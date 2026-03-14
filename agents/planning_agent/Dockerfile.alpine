@@ -1,0 +1,18 @@
+# 베이스 이미지: 반드시 python:3.X-alpine 사용 (slim 금지)
+FROM python:3.12-alpine
+
+# 에이전트 실행 작업 디렉토리 설정
+WORKDIR /app
+
+# (선택) 시스템 종속성이 필요하다면 apk 활용
+# RUN apk add --no-cache ...
+
+# 프로젝트 루트에서 필요한 모듈만 이미지 내부로 복사 (모노리포 구조)
+COPY ./shared_core /app/shared_core
+COPY ./agents/planning_agent /app/agents/planning_agent
+
+# (선택) requirements 등 파이썬 의존성 설치
+# RUN pip install --no-cache-dir -r /app/agents/planning_agent/requirements.txt
+
+# 진입점 설정: 데몬 또는 무한 대기 상태가 아닌, 단일 스크립트 실행 후 즉시 종료되도록 구성
+CMD ["python", "-m", "agents.planning_agent.main"]
