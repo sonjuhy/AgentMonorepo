@@ -5,7 +5,7 @@ Planning Agent 진입점
 
 import asyncio
 
-from agents.planning_agent.agent import PlanningAgent
+from agents.planning_agent.notion.agent import PlanningAgent
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ Notion API 페이로드 파싱 모듈 (Notion-Version: 2022-06-28)
 
 from typing import Any
 
-from .models import ParsedTask, RawPayload
+from ..models import ParsedTask, RawPayload
 
 
 def parse_notion_task(payload: RawPayload) -> ParsedTask | None:

@@ -9,8 +9,9 @@ from typing import Any
 
 import httpx
 
-from .models import ExecutionResult, ParsedTask, RawPayload
+from ..models import ExecutionResult, ParsedTask, RawPayload
 from .notion_parser import parse_notion_task
+from .task_analyzer import ClaudeAPITaskAnalyzer, TaskAnalyzerProtocol
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
@@ -24,7 +25,7 @@ class PlanningAgent:
 
     agent_name: str = "planning-agent"
 
-    def __init__(self) -> None:
+    def __init__(self, task_analyzer: TaskAnalyzerProtocol | None = None) -> None:
         self._token: str = os.environ["NOTION_TOKEN"]
         self._database_id: str = os.environ["NOTION_DATABASE_ID"]
         self._headers: dict[str, str] = {
@@ -32,6 +33,7 @@ class PlanningAgent:
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
+        self.task_analyzer = task_analyzer or ClaudeAPITaskAnalyzer()
 
     async def fetch_pending_tasks(self) -> list[RawPayload]:
         """
@@ -114,7 +116,7 @@ class PlanningAgent:
     async def process_task(self, task_data: ParsedTask) -> ExecutionResult:
         """
         개별 기획 태스크를 처리합니다.
-        현재는 태스크 정보를 출력하고 성공으로 보고합니다.
+        문서 생성기를 통해 요구사항을 세분화하여 Markdown 파일과 Notion 기획안 속성을 갱신합니다.
 
         Args:
             task_data (ParsedTask): 파싱 완료된 작업 데이터.
@@ -129,9 +131,29 @@ class PlanningAgent:
             if task_data["description"]:
                 print(f"  목적: {task_data['description']}")
 
-            # TODO: 실제 기획 처리 로직 삽입 (예: LLM 호출, 문서 생성 등)
+            # 1. 마크다운 생성 (목표, 과정, 결과 - 기능/조립도/출력)
+            markdown_doc = await self.task_analyzer.analyze_task(task_data)
+            
+            # 2. 로컬 MD 파일 저장 (또는 CLI나 LLM으로 생성된 최종 결과물 보관)
+            file_name = f"task_{task_data['page_id']}.md"
+            with open(file_name, "w", encoding="utf-8") as file:
+                file.write(markdown_doc)
+            print(f"[{self.agent_name}] 상세 기획 마크다운 작성 완료: {file_name}")
 
-            return (True, f"태스크 처리 완료: {task_data['page_id']}")
+            # 3. Notion 업데이트
+            # 기획안/설계도에 markdown_doc 전체를 업데이트
+            # 실제 DB 상태 옵션(hex 검증): 검토중 → 승인 대기중 → 완료
+            update_success, update_msg = await self.update_notion_task(
+                page_id=task_data["page_id"],
+                status="승인 대기중",
+                design_doc=markdown_doc
+            )
+
+            if update_success:
+                return (True, f"태스크 처리 및 노션 업데이트 완료: {task_data['page_id']}")
+            else:
+                return (False, f"태스크 처리 완료하지만 노션 업데이트 실패: {update_msg}")
+            
         except Exception as e:
             return (False, f"태스크 처리 실패: {e}")
 

@@ -6,7 +6,7 @@ import pprint
 import httpx
 from dotenv import load_dotenv
 
-from agents.planning_agent.agent import PlanningAgent
+from agents.planning_agent.notion.agent import PlanningAgent
 from agents.planning_agent.models import ParsedTask
 
 # 프로젝트 루트의 .env 파일 로드
@@ -65,46 +65,96 @@ async def test_process_task(planning_agent: PlanningAgent) -> None:
         "status": "검토중"
     }
     
-    success, message = await planning_agent.process_task(sample_task)
+    with patch.object(planning_agent, 'update_notion_task', new_callable=AsyncMock) as mock_update:
+        mock_update.return_value = (True, "mocked update")
+        success, message = await planning_agent.process_task(sample_task)
     
     assert success is True
     assert "test_page_123" in message
 
 @pytest.mark.asyncio
-async def test_create_real_task_in_notion(planning_agent: PlanningAgent) -> None:
-    """실제로 Notion 데이터베이스에 새로운 작업을 생성하는 테스트"""
+async def test_full_pipeline_with_real_data(planning_agent: PlanningAgent) -> None:
+    """
+    실제 Notion DB에 기획 태스크를 생성하고,
+    process_task를 통해 MD 파일 생성 + Notion 업데이트까지
+    전 과정을 end-to-end로 검증하는 풀 테스트입니다.
+    """
     if planning_agent._token == "dummy_test_token" or planning_agent._token is None:
         pytest.skip(".env에 실제 NOTION_TOKEN이 설정되지 않아 통신 테스트를 생략합니다.")
 
+    # ── STEP 1: 실제 기획 데이터를 Notion에 생성 ──────────────────────────────
     url = "https://api.notion.com/v1/pages"
     body = {
         "parent": {"database_id": planning_agent._database_id},
         "properties": {
             "제목": {
-                "title": [{"text": {"content": "[Test] 자동 생성된 테스트 기획 태스크"}}]
+                "title": [{"text": {"content": "[E2E TEST] AI 코드 리뷰 에이전트 설계"}}]
             },
             "현황": {
                 "status": {"name": "검토중"}
             },
             "목적": {
-                "rich_text": [{"text": {"content": "Notion API 쓰기 테스트용 자동 생성 데이터입니다."}}]
+                "rich_text": [{
+                    "text": {
+                        "content": (
+                            "개발자가 PR을 올리면 LLM이 자동으로 코드 품질, "
+                            "보안 취약점, 컨벤션 준수 여부를 리뷰하고 GitHub PR에 코멘트를 달아주는 에이전트를 설계한다."
+                        )
+                    }
+                }]
             },
-            "타입": {
-                "select": {"name": "새 프로젝트"}
-            },
-            "우선순위": {
-                "select": {"name": "P0"}
-            }
         }
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(url, headers=planning_agent._headers, json=body)
-        
-        assert response.status_code == 200, f"노션 쓰기 실패: {response.text}"
-        data = response.json()
-        assert "id" in data
-        print(f"\n새로운 노션 태스크 생성 완료. Page ID: {data['id']}")
+        assert response.status_code == 200, f"노션 태스크 생성 실패: {response.text}"
+        page_id: str = response.json()["id"]
+
+    print(f"\n[STEP 1] Notion 태스크 생성 완료. Page ID: {page_id}")
+
+    # ── STEP 2: ParsedTask로 변환하여 process_task 실행 ───────────────────────
+    from agents.planning_agent.models import ParsedTask
+    sample_task: ParsedTask = {
+        "page_id": page_id,
+        "title": "[E2E TEST] AI 코드 리뷰 에이전트 설계",
+        "description": (
+            "개발자가 PR을 올리면 LLM이 자동으로 코드 품질, "
+            "보안 취약점, 컨벤션 준수 여부를 리뷰하고 GitHub PR에 코멘트를 달아주는 에이전트를 설계한다."
+        ),
+        "status": "검토중",
+        "github_pr": "",
+        "design_doc": "",
+        "agent_assignees": ["planning-agent"],
+        "assignees": [],
+        "skeleton_code": "",
+        "priority": "P1",
+        "last_edited_time": "",
+        "task_type": "새 프로젝트",
+    }
+
+    success, message = await planning_agent.process_task(sample_task)
+    print(f"[STEP 2] process_task 결과: success={success}, message={message}")
+
+    # ── STEP 3: 생성된 MD 파일 검증 ──────────────────────────────────────────
+    import os
+    md_path = f"task_{page_id}.md"
+    assert os.path.exists(md_path), f"MD 파일이 생성되지 않았습니다: {md_path}"
+    with open(md_path, encoding="utf-8") as f:
+        content = f.read()
+
+    print(f"\n[STEP 3] 생성된 MD 파일 내용:\n{'='*60}\n{content}\n{'='*60}")
+
+    assert "1. 목표" in content, "목표 섹션 없음"
+    assert "2. 과정" in content, "과정 섹션 없음"
+    assert "3. 결과" in content, "결과 섹션 없음"
+    assert "기능" in content, "기능 항목 없음"
+    assert "기능들의 조립도" in content, "조립도 항목 없음"
+    assert "출력" in content, "출력 항목 없음"
+
+    # ── STEP 4: Notion에 정상 업데이트되었는지 확인 ──────────────────────────
+    assert success is True, f"Notion 업데이트 실패: {message}"
+    print(f"[STEP 4] Notion 업데이트 성공. 상태: 승인 대기중 전환 완료.")
 
 @pytest.mark.asyncio
 async def test_update_real_task_in_notion(planning_agent: PlanningAgent) -> None:
