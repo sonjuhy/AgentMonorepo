@@ -1,0 +1,9 @@
+# Slack Agent 의존성 (v2 - FastAPI + slack_bolt + slack_sdk 기반)
+httpx>=0.27.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+slack-bolt>=1.21.0
+slack-sdk>=3.31.0
+python-dotenv>=1.0.0
+anthropic>=0.40.0
+google-genai>=1.0.0

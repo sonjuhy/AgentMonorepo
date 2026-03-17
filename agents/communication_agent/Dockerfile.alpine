@@ -1,0 +1,15 @@
+# 베이스 이미지: 반드시 python:3.X-alpine 사용 (slim 금지)
+FROM python:3.12-alpine
+
+# 에이전트 실행 작업 디렉토리 설정
+WORKDIR /app
+
+# 프로젝트 루트에서 필요한 모듈만 이미지 내부로 복사 (모노리포 구조)
+COPY ./shared_core /app/shared_core
+COPY ./agents/slack_agent /app/agents/slack_agent
+
+# (선택) slack_sdk 등 파이썬 의존성 설치 환경 구성
+# RUN pip install --no-cache-dir -r /app/agents/slack_agent/requirements.txt
+
+# 진입점 설정: 데몬 또는 무한 대기 상태가 아닌, 단일 스크립트 실행 후 즉시 종료
+CMD ["python", "/app/agents/slack_agent/main.py"]
