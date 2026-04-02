@@ -1,5 +1,5 @@
 """
-Slack Agent 데이터 모델 (Python 3.12+)
+Communication Agent 데이터 모델 (Python 3.12+)
 """
 
 from typing import Any, TypedDict
@@ -41,3 +41,38 @@ class ParsedTask(TypedDict):
     priority: str
     last_edited_time: str
     task_type: str
+
+
+# ── Redis 기반 메시지 브로커 스키마 ──────────────────────────────────────────────
+
+class OrchestraTaskRequester(TypedDict):
+    """오케스트라 태스크 요청자 정보"""
+    user_id: str
+    channel_id: str
+
+
+class OrchestraTask(TypedDict):
+    """소통 에이전트 → Redis → 오케스트라 전달 메시지 스키마"""
+    task_id: str
+    requester: OrchestraTaskRequester
+    content: str
+    source: str           # 항상 "slack"
+    thread_ts: str | None  # 스레드 루트 ts (세션 연속성용)
+
+
+class OrchestraResult(TypedDict):
+    """오케스트라 → Redis → 소통 에이전트 결과 메시지 스키마"""
+    task_id: str
+    content: str
+    requires_user_approval: bool
+    agent_name: str
+    progress_percent: int | None  # None이면 완료, 0~99면 진행 중
+
+
+class ApprovalFeedback(TypedDict):
+    """사용자 [승인/수정 요청/취소] 버튼 클릭 피드백 스키마"""
+    task_id: str
+    action: str           # "approve" | "request_revision" | "cancel"
+    user_id: str
+    channel_id: str
+    comment: str | None   # 수정 요청 시 입력된 텍스트
