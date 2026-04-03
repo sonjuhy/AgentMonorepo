@@ -54,9 +54,10 @@ class OrchestraTaskRequester(TypedDict):
 class OrchestraTask(TypedDict):
     """소통 에이전트 → Redis → 오케스트라 전달 메시지 스키마"""
     task_id: str
+    session_id: str        # 오케스트라 NLU 컨텍스트 주입용 (format: user_id:channel_id)
     requester: OrchestraTaskRequester
     content: str
-    source: str           # 항상 "slack"
+    source: str            # 항상 "slack"
     thread_ts: str | None  # 스레드 루트 ts (세션 연속성용)
 
 

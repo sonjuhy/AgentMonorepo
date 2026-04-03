@@ -19,7 +19,9 @@ logger = logging.getLogger("slack_agent.redis_broker")
 # Redis 큐 키 상수
 ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
 COMM_TASKS_KEY = "agent:communication:tasks"
-ORCHESTRA_RESULTS_KEY = "orchestra:results"
+# 승인 피드백은 태스크별 큐를 사용 (오케스트라와 일치)
+# 키 형식: orchestra:approval:{approval_task_id}
+_APPROVAL_KEY_PREFIX = "orchestra:approval:"
 
 # 세션 TTL: 2시간
 _SESSION_TTL = 7200
@@ -64,26 +66,39 @@ class RedisBroker:
             str: 생성된 task_id (UUID).
         """
         task_id = str(uuid.uuid4())
+        # session_id: 오케스트라 NLU 컨텍스트 주입용 (user_id:channel_id 형식)
+        session_id = f"{user_id}:{channel_id}"
         task: dict[str, Any] = {
             "task_id": task_id,
+            "session_id": session_id,
             "requester": {"user_id": user_id, "channel_id": channel_id},
             "content": content,
             "source": "slack",
             "thread_ts": thread_ts,
         }
         await self._client.rpush(ORCHESTRA_TASKS_KEY, json.dumps(task, ensure_ascii=False))
-        logger.debug("[RedisBroker] push_to_orchestra task_id=%s", task_id)
+        logger.debug("[RedisBroker] push_to_orchestra task_id=%s session_id=%s", task_id, session_id)
         return task_id
 
     async def push_approval(self, feedback: dict[str, Any]) -> None:
         """
-        사용자 승인/반려 피드백을 orchestra:results 큐에 삽입합니다.
+        사용자 승인/반려 피드백을 orchestra:approval:{task_id} 큐에 삽입합니다.
+
+        오케스트라는 태스크별 큐(orchestra:approval:{approval_task_id})에서
+        BLPOP으로 승인 응답을 대기합니다. 단일 큐(orchestra:results)에 push하면
+        오케스트라가 응답을 수신하지 못하므로 반드시 task_id별 큐를 사용합니다.
 
         Args:
             feedback (dict): ApprovalFeedback 스키마 딕셔너리.
+                             반드시 "task_id" 필드를 포함해야 합니다.
         """
-        await self._client.rpush(ORCHESTRA_RESULTS_KEY, json.dumps(feedback, ensure_ascii=False))
-        logger.debug("[RedisBroker] push_approval task_id=%s action=%s", feedback.get("task_id"), feedback.get("action"))
+        task_id = feedback.get("task_id", "")
+        if not task_id:
+            logger.error("[RedisBroker] push_approval: task_id 없음 — 피드백 무시")
+            return
+        key = f"{_APPROVAL_KEY_PREFIX}{task_id}"
+        await self._client.rpush(key, json.dumps(feedback, ensure_ascii=False))
+        logger.debug("[RedisBroker] push_approval key=%s action=%s", key, feedback.get("action"))
 
     async def blpop_comm_task(self, timeout: float = 5.0) -> dict[str, Any] | None:
         """
