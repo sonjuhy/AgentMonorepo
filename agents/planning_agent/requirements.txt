@@ -1,3 +1,21 @@
+# Planning Agent Dependencies
+
+# Notion API & HTTP
 httpx>=0.27.0
+
+# LLM 백엔드 (primary: Claude, fallback: Gemini)
 anthropic>=0.40.0
 google-genai>=1.0.0
+
+# Redis (server 모드: OrchestraManager 연동)
+redis[hiredis]>=5.0.0
+
+# FastAPI & ASGI (server 모드)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Pydantic v2 (FastAPI 요청 바디 검증)
+pydantic>=2.7.0
+
+# 환경변수 로딩
+python-dotenv>=1.0.0

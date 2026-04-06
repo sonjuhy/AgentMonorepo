@@ -2,17 +2,19 @@
 Planning Agent 추상 인터페이스 (Protocol)
 - python-strict-typing 전략: 엄격한 정적 타입 선언 및 추상 인터페이스
 - ephemeral-docker-ops 전략: 단발성 실행 사이클 계약
+- v2: PlanningRedisListenerProtocol 추가 (Orchestra 연동 모드)
 """
 
-from typing import Protocol
+from typing import Any, Protocol
 
-from .models import ExecutionResult, ParsedTask, RawPayload
+from .models import ExecutionResult, ParsedTask, PlanningTaskResult, RawPayload
 
 
 class PlanningAgentProtocol(Protocol):
     """
     Planning Agent의 동작을 정의하는 추상 인터페이스입니다.
     이 에이전트는 무한 루프나 데몬 없이, 스케줄링된 1회 실행 주기를 갖습니다.
+    (ephemeral 모드: cron 스케줄러 또는 직접 실행용)
     """
 
     agent_name: str
@@ -44,5 +46,59 @@ class PlanningAgentProtocol(Protocol):
         에이전트 사이클의 진입점입니다.
         작업을 가져오고 파싱하여 처리한 후 곧바로 프로세스를 종료(자연 종료)해야 합니다.
         (ephemeral-docker-ops 전략 준수: while True 혹은 asyncio.sleep 반복 금지)
+        """
+        ...
+
+
+class PlanningRedisListenerProtocol(Protocol):
+    """
+    OrchestraManager Redis 큐 수신 모드 인터페이스.
+
+    - Inbound:  BLPOP agent:planning:tasks  (DispatchMessage 형식)
+    - Outbound: HTTP POST {orchestra_url}/results  (AgentResult 형식)
+    - Health:   Redis Hash agent:planning:health  (15초 주기 heartbeat)
+
+    FastAPI lifespan에서 asyncio.Task로 실행되는 백그라운드 루프입니다.
+    """
+
+    async def listen_tasks(self) -> None:
+        """
+        agent:planning:tasks 큐를 BLPOP으로 감시하는 메인 루프.
+        각 태스크를 handle_task()로 처리하며, CancelledError를 감지하여 정상 종료한다.
+        """
+        ...
+
+    async def handle_task(self, raw: str) -> None:
+        """
+        Redis에서 수신한 JSON 문자열을 DispatchMessage로 파싱하고
+        PlanningAgent.handle_dispatch()에 위임한 뒤 결과를 보고한다.
+
+        Args:
+            raw: BLPOP으로 수신한 직렬화된 JSON 문자열.
+        """
+        ...
+
+    async def _report_result(
+        self,
+        task_id: str,
+        result_data: PlanningTaskResult,
+        status: str,
+        error: dict[str, Any] | None,
+    ) -> None:
+        """
+        처리 결과를 OrchestraManager POST /results 엔드포인트로 전송한다.
+
+        Args:
+            task_id: 원본 DispatchMessage의 task_id.
+            result_data: PlanningTaskResult 딕셔너리.
+            status: "COMPLETED" | "FAILED".
+            error: 실패 시 {code, message, traceback}, 성공 시 None.
+        """
+        ...
+
+    async def _heartbeat_loop(self) -> None:
+        """
+        15초 주기로 agent:planning:health Redis Hash를 갱신한다.
+        OrchestraManager의 HealthMonitor가 이 값을 읽어 가용 여부를 판단한다.
         """
         ...

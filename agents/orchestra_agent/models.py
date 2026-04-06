@@ -157,6 +157,7 @@ class CommAgentMessage(TypedDict):
 # 에이전트 레지스트리: 에이전트 이름 → 기본 timeout(초)
 AGENT_TIMEOUT_MAP: dict[str, int] = {
     "coding_agent": 600,
+    "planning_agent": 300,
     "research_agent": 300,
     "calendar_agent": 60,
     "file_agent": 120,

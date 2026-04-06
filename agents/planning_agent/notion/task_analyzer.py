@@ -140,3 +140,25 @@ class GeminiCLITaskAnalyzer:
         if proc.returncode != 0:
             raise RuntimeError(f"Gemini CLI 오류: {stderr.decode()}")
         return stdout.decode().strip()
+
+
+def build_task_analyzer(backend: str | None = None) -> TaskAnalyzerProtocol:
+    """
+    환경변수 TASK_ANALYZER_BACKEND에 따라 적절한 TaskAnalyzer를 반환합니다.
+
+    백엔드 선택:
+        claude (기본): ClaudeAPITaskAnalyzer (ANTHROPIC_API_KEY 필요)
+        gemini:        GeminiAPITaskAnalyzer (GEMINI_API_KEY 필요)
+        claude_cli:    ClaudeCLITaskAnalyzer (claude CLI 설치 필요)
+        gemini_cli:    GeminiCLITaskAnalyzer (gemini CLI 설치 필요)
+    """
+    selected = backend or os.environ.get("TASK_ANALYZER_BACKEND", "claude")
+    match selected:
+        case "gemini":
+            return GeminiAPITaskAnalyzer()
+        case "claude_cli":
+            return ClaudeCLITaskAnalyzer()
+        case "gemini_cli":
+            return GeminiCLITaskAnalyzer()
+        case _:
+            return ClaudeAPITaskAnalyzer()
