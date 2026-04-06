@@ -163,6 +163,7 @@ AGENT_TIMEOUT_MAP: dict[str, int] = {
     "file_agent": 120,
     "archive_agent": 120,
     "communication_agent": 30,
+    "sandbox_agent": 60,
 }
 
 # 재시도 가능한 에러 코드
