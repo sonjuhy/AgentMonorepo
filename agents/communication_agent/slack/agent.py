@@ -1,25 +1,44 @@
 """
-Slack Agent 구체 구현체 (v2 - slack_sdk.WebClient 기반)
-- Incoming Webhook(httpx) 대신 slack_sdk AsyncWebClient 로 메시지 전송
-- WebClient 인스턴스를 외부 주입(DI) 받아 FastAPI lifespan 과 공유
-- Notion API 연동 및 승인 대기 태스크 알림 발송
-- ephemeral-docker-ops 전략: 단발성 실행 후 자연 종료
+소통 에이전트 구체 구현체 (v3 - SlackCommAgent)
+- Slack API와 Redis 사이의 양방향 게이트웨이
+- Inbound:  Slack → on_user_request → Redis agent:orchestra:tasks
+- Outbound: Redis agent:communication:tasks → listen_system_results → Slack
+- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis orchestra:results
+- Notion 알림 발송 기능 유지 (fetch_notifications / run)
 """
 
+from __future__ import annotations
+
+import asyncio
+import logging
 import os
 from typing import Any
 
 import httpx
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-from ..models import ExecutionResult, ParsedTask, RawPayload, SlackMessage
+from ..models import (
+    ApprovalFeedback,
+    ExecutionResult,
+    OrchestraResult,
+    ParsedTask,
+    RawPayload,
+    SlackEvent,
+    SlackMessage,
+)
+from .message_cleaner import MessageCleaner
 from .notion_parser import parse_notion_task
+from .redis_broker import RedisBroker
+
+logger = logging.getLogger("slack_agent.agent")
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 NOTION_PAGE_BASE = "https://www.notion.so"
 
 _DESIGN_DOC_MAX_LEN = 500
+_MAX_RETRIES = 3
 
 _PRIORITY_EMOJI: dict[str, str] = {
     "높음": "🔴",
@@ -27,47 +46,393 @@ _PRIORITY_EMOJI: dict[str, str] = {
     "낮음": "🟢",
 }
 
+# 권한 관리: 허용된 채널/사용자 (비어있으면 전체 허용)
+_ALLOWED_CHANNELS: list[str] = [
+    c for c in os.environ.get("SLACK_ALLOWED_CHANNELS", "").split(",") if c
+]
+_ALLOWED_USER_IDS: list[str] = [
+    u for u in os.environ.get("SLACK_ALLOWED_USERS", "").split(",") if u
+]
 
-class SlackAgent:
+
+def _is_authorized(user_id: str, channel_id: str) -> bool:
+    """허용된 채널 및 사용자인지 확인합니다."""
+    channel_ok = not _ALLOWED_CHANNELS or channel_id in _ALLOWED_CHANNELS
+    user_ok = not _ALLOWED_USER_IDS or user_id in _ALLOWED_USER_IDS
+    return channel_ok and user_ok
+
+
+class SlackCommAgent:
     """
-    SlackAgentProtocol의 구체 구현체 (slack_sdk.AsyncWebClient 기반).
+    소통 에이전트 (Communication Agent) 구체 구현체.
 
-    Notion DB에서 '승인 대기중' 태스크를 조회하여 Slack 채널로 알림을 발송합니다.
-
-    Attributes:
-        agent_name (str): 에이전트 식별 이름.
+    역할:
+        - 사용자 Slack 메시지를 수신하여 오케스트라 Redis 큐로 전달
+        - 오케스트라 처리 결과를 Redis에서 수신하여 Slack으로 렌더링
+        - 승인/반려 버튼 UI 제공 및 피드백 Redis 전달
+        - Notion 승인 대기 태스크 알림 발송 (기존 기능 유지)
 
     환경 변수:
-        NOTION_TOKEN       : Notion API 인증 토큰
-        NOTION_DATABASE_ID : 조회할 Notion 데이터베이스 ID
-        SLACK_CHANNEL      : 메시지를 발송할 Slack 채널 ID (예: C06XXXXXXX)
+        NOTION_TOKEN          : Notion API 인증 토큰
+        NOTION_DB_ID          : 조회할 Notion 데이터베이스 ID
+        SLACK_CHANNEL         : 메시지를 발송할 Slack 채널 ID
+        SLACK_ALLOWED_CHANNELS: 허용된 채널 ID 목록 (쉼표 구분, 비어있으면 전체 허용)
+        SLACK_ALLOWED_USERS   : 허용된 사용자 ID 목록 (쉼표 구분, 비어있으면 전체 허용)
+        REDIS_URL             : Redis 접속 URL (기본값: redis://localhost:6379)
     """
 
-    agent_name: str = "slack-agent"
+    agent_name: str = "communication-agent"
 
-    def __init__(self, web_client: AsyncWebClient | None = None) -> None:
+    def __init__(
+        self,
+        web_client: AsyncWebClient | None = None,
+        redis: RedisBroker | None = None,
+    ) -> None:
         """
-        SlackAgent 초기화.
+        SlackCommAgent 초기화.
 
         Args:
             web_client (AsyncWebClient | None):
-                외부에서 주입할 slack_sdk AsyncWebClient 인스턴스.
-                None 이면 SLACK_BOT_TOKEN 환경변수로 새로 생성합니다.
+                외부 주입 slack_sdk AsyncWebClient.
+                None이면 SLACK_BOT_TOKEN 환경변수로 새로 생성합니다.
+            redis (RedisBroker | None):
+                외부 주입 RedisBroker.
+                None이면 REDIS_URL 환경변수로 새로 생성합니다.
+                Redis 없이도 Notion 알림 기능은 동작합니다.
         """
-        self._notion_token: str = os.environ["NOTION_TOKEN"]
-        self._database_id: str = os.environ["NOTION_DB_ID"]
+        self._notion_token: str = os.environ.get("NOTION_TOKEN", "")
+        self._database_id: str = os.environ.get("NOTION_DB_ID", "")
         self._slack_channel: str = os.environ.get("SLACK_CHANNEL", "")
         self._notion_headers: dict[str, str] = {
             "Authorization": f"Bearer {self._notion_token}",
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
-        # WebClient 외부 주입 or 자체 생성
+
         if web_client is not None:
             self._web_client = web_client
         else:
             bot_token: str = os.environ["SLACK_BOT_TOKEN"]
             self._web_client = AsyncWebClient(token=bot_token)
+
+        self._redis: RedisBroker | None = redis
+
+    # ── 권한 확인 ──────────────────────────────────────────────────────────────
+
+    def is_authorized(self, user_id: str, channel_id: str) -> bool:
+        """허용된 채널 및 사용자인지 확인합니다."""
+        return _is_authorized(user_id, channel_id)
+
+    # ── Inbound: 사용자 요청 처리 ──────────────────────────────────────────────
+
+    async def on_user_request(self, event: SlackEvent, say: Any) -> None:
+        """
+        Slack 메시지를 수신하여 정제 후 오케스트라 Redis 큐로 전달합니다.
+
+        처리 흐름:
+            1. 권한 확인
+            2. MessageCleaner로 @bot 멘션 등 제거
+            3. 세션 기반 Slack 스레드 생성 또는 조회
+            4. Redis agent:orchestra:tasks에 OrchestraTask 삽입
+            5. 접수 확인 메시지 전송
+        """
+        user_id: str = event["user"]
+        channel_id: str = event["channel"]
+        ts: str = event["ts"]
+
+        if not self.is_authorized(user_id, channel_id):
+            logger.warning("[CommAgent] 미허가 접근 user=%s channel=%s", user_id, channel_id)
+            return
+
+        clean_text = MessageCleaner.clean(event["text"])
+        if not clean_text:
+            return
+
+        if self._redis is None:
+            logger.warning("[CommAgent] Redis 미설정 — on_user_request 건너뜀")
+            return
+
+        # 세션 ID: user_id + channel_id 조합
+        session_id = f"{user_id}:{channel_id}"
+
+        # 기존 스레드가 없으면 새 스레드 루트 생성
+        thread_ts = await self._redis.get_thread_ts(session_id)
+        if thread_ts is None:
+            resp = await self._web_client.chat_postMessage(
+                channel=channel_id,
+                text="⏳ 요청을 접수했습니다. 처리 중입니다...",
+            )
+            thread_ts = resp["ts"]
+            await self._redis.save_thread_ts(session_id, thread_ts)
+        else:
+            await say(text="⏳ 요청을 접수했습니다. 처리 중입니다...", thread_ts=thread_ts)
+
+        # 오케스트라 큐에 전달
+        task_id = await self._redis.push_to_orchestra(
+            user_id=user_id,
+            channel_id=channel_id,
+            content=clean_text,
+            thread_ts=thread_ts,
+        )
+
+        # 태스크 컨텍스트 저장 (버튼 클릭 시 채널/스레드 복원용)
+        await self._redis.save_task_context(task_id, {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "user_id": user_id,
+            "session_id": session_id,
+        })
+
+        logger.info(
+            "[CommAgent] 오케스트라 전달 — task_id=%s user=%s text=%.60s",
+            task_id,
+            user_id,
+            clean_text,
+        )
+
+    # ── Outbound: 시스템 결과 수신 루프 ───────────────────────────────────────
+
+    async def listen_system_results(self) -> None:
+        """
+        Redis agent:communication:tasks 큐를 모니터링하여
+        오케스트라 결과를 Slack Block Kit으로 렌더링합니다.
+
+        FastAPI lifespan에서 asyncio.Task로 실행되는 백그라운드 루프입니다.
+        """
+        if self._redis is None:
+            logger.warning("[CommAgent] Redis 미설정 — listen_system_results 종료")
+            return
+
+        logger.info("[CommAgent] Redis 결과 리스너 시작 (queue=%s)", "agent:communication:tasks")
+        while True:
+            try:
+                result = await self._redis.blpop_comm_task(timeout=5.0)
+                if result is None:
+                    continue
+                await self._handle_system_result(result)
+            except asyncio.CancelledError:
+                logger.info("[CommAgent] Redis 결과 리스너 종료")
+                break
+            except Exception as exc:
+                logger.error("[CommAgent] 결과 처리 오류: %s", exc)
+                await asyncio.sleep(1.0)
+
+    async def _handle_system_result(self, result: dict[str, Any]) -> None:
+        """
+        수신된 OrchestraResult를 파싱하고 Slack으로 전송합니다.
+
+        진행 중(progress_percent not None)이면 기존 진행 메시지를 chat_update로 수정합니다.
+        완료(progress_percent is None)이면 최종 결과를 새 메시지 또는 승인 UI로 전송합니다.
+        """
+        task_id: str = result.get("task_id", "")
+        content: str = result.get("content", "")
+        requires_approval: bool = result.get("requires_user_approval", False)
+        agent_name: str = result.get("agent_name", "에이전트")
+        progress_percent: int | None = result.get("progress_percent")
+
+        # 태스크 컨텍스트 복원
+        ctx = await self._redis.get_task_context(task_id) if self._redis else None
+        if ctx is None:
+            logger.warning("[CommAgent] 태스크 컨텍스트 없음: task_id=%s", task_id)
+            return
+
+        channel_id: str = ctx["channel_id"]
+        thread_ts: str = ctx["thread_ts"]
+        session_id: str = ctx["session_id"]
+
+        # 진행 상태 업데이트
+        if progress_percent is not None:
+            await self._post_progress_update(
+                session_id=session_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                percent=progress_percent,
+                message=content,
+            )
+            return
+
+        # 최종 결과 전송
+        if requires_approval:
+            blocks = self.build_approval_blocks(content, task_id)
+            text_fallback = f"⚠️ 실행 승인 요청: {content[:100]}"
+        else:
+            blocks = self._build_standard_blocks(content, agent_name)
+            text_fallback = f"✅ {agent_name} 처리 완료"
+
+        await self._send_with_retry(
+            channel=channel_id,
+            blocks=blocks,
+            text=text_fallback,
+            thread_ts=thread_ts,
+        )
+
+    async def _post_progress_update(
+        self,
+        session_id: str,
+        channel_id: str,
+        thread_ts: str,
+        percent: int,
+        message: str,
+    ) -> None:
+        """
+        진행 상태 메시지를 chat_update로 업데이트합니다 (노이즈 최소화).
+        기존 진행 메시지가 없으면 새로 생성합니다.
+        """
+        if self._redis is None:
+            return
+
+        progress_text = f"🔄 {message} ({percent}%)"
+        existing_ts = await self._redis.get_progress_msg_ts(session_id)
+
+        if existing_ts:
+            try:
+                await self._web_client.chat_update(
+                    channel=channel_id,
+                    ts=existing_ts,
+                    text=progress_text,
+                )
+                return
+            except SlackApiError:
+                pass  # 메시지가 삭제된 경우 새로 생성
+
+        resp = await self._web_client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=progress_text,
+        )
+        await self._redis.save_progress_msg_ts(session_id, resp["ts"])
+
+    # ── Block Kit 빌더 ────────────────────────────────────────────────────────
+
+    def build_approval_blocks(self, content: str, task_id: str) -> list[dict[str, Any]]:
+        """
+        [승인] [수정 요청] [취소] 버튼이 포함된 Slack Block Kit 블록 리스트를 생성합니다.
+
+        Args:
+            content (str): 승인 요청 내용 요약 텍스트.
+            task_id (str): 버튼 value에 포함될 태스크 식별자.
+
+        Returns:
+            list[dict]: Slack Block Kit 블록 리스트.
+        """
+        return [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "⚠️ 실행 승인 요청", "emoji": True},
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": content},
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "승인", "emoji": True},
+                        "style": "primary",
+                        "action_id": "approve_task",
+                        "value": task_id,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "수정 요청", "emoji": True},
+                        "action_id": "request_revision",
+                        "value": task_id,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "취소", "emoji": True},
+                        "style": "danger",
+                        "action_id": "cancel_task",
+                        "value": task_id,
+                    },
+                ],
+            },
+        ]
+
+    def _build_standard_blocks(
+        self, content: str, agent_name: str
+    ) -> list[dict[str, Any]]:
+        """
+        일반 결과 응답용 Slack Block Kit 블록 리스트를 생성합니다.
+
+        Args:
+            content (str): 결과 본문 텍스트 (마크다운 지원).
+            agent_name (str): 처리한 에이전트 이름.
+
+        Returns:
+            list[dict]: Slack Block Kit 블록 리스트.
+        """
+        return [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "✅ 작업이 완료되었습니다.", "emoji": True},
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": content},
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"처리 에이전트: *{agent_name}*"},
+                ],
+            },
+        ]
+
+    # ── Rate Limit 재시도 전송 ────────────────────────────────────────────────
+
+    async def _send_with_retry(
+        self,
+        channel: str,
+        blocks: list[dict[str, Any]],
+        text: str = "",
+        thread_ts: str | None = None,
+        max_retries: int = _MAX_RETRIES,
+    ) -> None:
+        """
+        Slack API Rate Limit 시 Retry-After 헤더를 준수하여 재시도합니다.
+
+        Args:
+            channel (str): 전송할 Slack 채널 ID.
+            blocks (list): Block Kit 블록 리스트.
+            text (str): 알림용 폴백 텍스트.
+            thread_ts (str | None): 스레드 답글 시 원본 메시지 ts.
+            max_retries (int): 최대 재시도 횟수.
+
+        Raises:
+            SlackApiError: 재시도 초과 또는 Rate Limit 외 오류.
+        """
+        kwargs: dict[str, Any] = {"channel": channel, "blocks": blocks, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+
+        for attempt in range(max_retries):
+            try:
+                await self._web_client.chat_postMessage(**kwargs)
+                return
+            except SlackApiError as e:
+                if e.response["error"] == "ratelimited":
+                    retry_after = int(e.response.headers.get("Retry-After", 30))
+                    logger.warning(
+                        "[CommAgent] Rate Limit — %d초 후 재시도 (%d/%d)",
+                        retry_after,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    await asyncio.sleep(retry_after)
+                else:
+                    raise
+
+        raise SlackApiError(
+            message="Slack API Rate Limit: 최대 재시도 초과",
+            response={"error": "max_retries_exceeded"},
+        )
+
+    # ── Notion 알림 발송 (기존 기능 유지) ──────────────────────────────────────
 
     async def fetch_notifications(self) -> list[RawPayload]:
         """
@@ -93,7 +458,7 @@ class SlackAgent:
 
     async def format_slack_message(self, task_data: ParsedTask) -> SlackMessage:
         """
-        ParsedTask를 Slack Block Kit 페이로드로 변환합니다.
+        ParsedTask를 Notion 알림용 Slack Block Kit 페이로드로 변환합니다.
 
         Args:
             task_data (ParsedTask): 파싱 완료된 작업 데이터.
@@ -185,7 +550,7 @@ class SlackAgent:
             response = await self._web_client.chat_postMessage(
                 channel=self._slack_channel,
                 blocks=message.get("blocks", []),
-                text="Notion 태스크 알림",  # 알림 폴백 텍스트
+                text="Notion 태스크 알림",
             )
             ts: str = response.get("ts", "")
             return (True, f"Slack 전송 성공 (ts={ts})")
@@ -194,14 +559,14 @@ class SlackAgent:
 
     async def run(self) -> None:
         """
-        에이전트 사이클의 진입점.
+        에이전트 사이클의 진입점 (Notion 알림 발송 전용).
         알림 조회 → 포맷팅 → Slack 전송 후 자연 종료합니다.
         (ephemeral-docker-ops 전략 준수: while True / asyncio.sleep 반복 금지)
         """
-        print(f"[{self.agent_name}] 실행 시작")
+        logger.info("[%s] 실행 시작", self.agent_name)
 
         raw_payloads = await self.fetch_notifications()
-        print(f"[{self.agent_name}] 조회된 알림 대상 태스크 수: {len(raw_payloads)}")
+        logger.info("[%s] 조회된 알림 대상 태스크 수: %d", self.agent_name, len(raw_payloads))
 
         for raw in raw_payloads:
             task = parse_notion_task(raw)
@@ -211,6 +576,10 @@ class SlackAgent:
             message = await self.format_slack_message(task)
             success, msg = await self.push_to_slack(message)
             status_label = "완료" if success else "실패"
-            print(f"[{self.agent_name}] [{task['title']}] Slack 전송 {status_label}: {msg}")
+            logger.info("[%s] [%s] Slack 전송 %s: %s", self.agent_name, task["title"], status_label, msg)
 
-        print(f"[{self.agent_name}] 실행 종료")
+        logger.info("[%s] 실행 종료", self.agent_name)
+
+
+# 하위 호환: 기존 SlackAgent 이름으로도 접근 가능
+SlackAgent = SlackCommAgent
