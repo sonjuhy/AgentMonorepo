@@ -1,0 +1,34 @@
+# Firecracker VM rootfs 빌드용 Docker 이미지
+#
+# 사용법 (build_rootfs.sh 권장):
+#   docker build -t sandbox-rootfs-builder -f Dockerfile.rootfs .
+#   CONTAINER_ID=$(docker create sandbox-rootfs-builder)
+#   docker export "$CONTAINER_ID" | tar -x -C /tmp/rootfs
+#   docker rm "$CONTAINER_ID"
+
+FROM alpine:3.20
+
+# 필수 패키지 설치
+#   python3     : Guest Agent 및 Python 코드 실행
+#   nodejs      : JavaScript 코드 실행
+#   bash        : bash 코드 실행
+#   iproute2    : ip 명령 (init에서 네트워크 설정)
+RUN apk add --no-cache \
+    python3 \
+    nodejs \
+    bash \
+    iproute2 \
+    && rm -rf /var/cache/apk/*
+
+# Guest Agent 설치
+COPY guest_agent.py /usr/local/bin/guest_agent.py
+RUN chmod +x /usr/local/bin/guest_agent.py
+
+# VM init 스크립트 (/init — kernel boot_args에서 init=/init 로 지정)
+COPY init /init
+RUN chmod +x /init
+
+# /proc, /sys, /dev 마운트 포인트 생성 (없으면 mount 실패)
+RUN mkdir -p /proc /sys /dev
+
+CMD ["/init"]

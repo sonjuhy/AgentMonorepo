@@ -2,14 +2,22 @@
 Planning Agent 구체 구현체
 - Notion API 연동 및 태스크 처리 로직
 - ephemeral-docker-ops 전략: 단발성 실행 후 자연 종료
+- v2: handle_dispatch() 추가 — OrchestraManager DispatchMessage 처리
 """
 
 import os
+import traceback
 from typing import Any
 
 import httpx
 
-from ..models import ExecutionResult, ParsedTask, RawPayload
+from ..models import (
+    ExecutionResult,
+    ParsedTask,
+    PlanningTaskParams,
+    PlanningTaskResult,
+    RawPayload,
+)
 from .notion_parser import parse_notion_task
 from .task_analyzer import ClaudeAPITaskAnalyzer, TaskAnalyzerProtocol
 
@@ -178,3 +186,85 @@ class PlanningAgent:
             print(f"[{self.agent_name}] {status_label}: {message}")
 
         print(f"[{self.agent_name}] 실행 종료")
+
+    async def handle_dispatch(
+        self,
+        dispatch_msg: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        OrchestraManager가 보낸 DispatchMessage를 처리하여 AgentResult 형식으로 반환합니다.
+
+        DispatchMessage.params는 PlanningTaskParams 구조를 따릅니다:
+        - source: "notion" → page_id 기반 Notion 태스크 처리
+        - source: "direct" → title/description 직접 분석
+
+        Args:
+            dispatch_msg: OrchestraManager DispatchMessage TypedDict (dict).
+
+        Returns:
+            AgentResult 호환 딕셔너리:
+            {task_id, status, result_data: PlanningTaskResult, error, usage_stats}
+        """
+        task_id: str = dispatch_msg.get("task_id", "unknown")
+        params: dict[str, Any] = dispatch_msg.get("params", {})
+
+        try:
+            # DispatchMessage.params → ParsedTask 변환
+            parsed: ParsedTask = {
+                "page_id": params.get("page_id") or "",
+                "title": params.get("title", ""),
+                "description": params.get("description", ""),
+                "status": "검토중",
+                "github_pr": "",
+                "design_doc": "",
+                "agent_assignees": ["planning-agent"],
+                "assignees": [],
+                "skeleton_code": "",
+                "priority": params.get("priority", ""),
+                "last_edited_time": "",
+                "task_type": params.get("task_type", ""),
+            }
+
+            print(f"[{self.agent_name}] dispatch 처리: task_id={task_id}, title={parsed['title']}")
+
+            # LLM 분석 → 마크다운 생성
+            markdown_doc = await self.task_analyzer.analyze_task(parsed)
+
+            # Notion 업데이트 (update_source=True + page_id 있을 때)
+            updated_page_id: str | None = None
+            if params.get("update_source") and parsed["page_id"]:
+                update_ok, _ = await self.update_notion_task(
+                    page_id=parsed["page_id"],
+                    status="승인 대기중",
+                    design_doc=markdown_doc,
+                )
+                if update_ok:
+                    updated_page_id = parsed["page_id"]
+
+            result_data: PlanningTaskResult = {
+                "markdown_doc": markdown_doc,
+                "page_id": updated_page_id,
+                "design_doc_preview": markdown_doc[:300],
+                "source": params.get("source", "direct"),
+            }
+
+            return {
+                "task_id": task_id,
+                "status": "COMPLETED",
+                "result_data": result_data,
+                "error": None,
+                "usage_stats": {},
+            }
+
+        except Exception as exc:
+            return {
+                "task_id": task_id,
+                "status": "FAILED",
+                "result_data": {},
+                "error": {
+                    "code": "EXECUTION_ERROR",
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+                "usage_stats": {},
+            }
