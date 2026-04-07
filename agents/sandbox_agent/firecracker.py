@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .models import ExecuteRequest, SandboxTaskResult
 from .network import TAPInterface
-from .vsock import recv_json, send_json
+from .vsock import open_vsock_connection, recv_json, send_json
 
 logger = logging.getLogger("sandbox_agent.firecracker")
 
@@ -126,7 +126,7 @@ class FirecrackerSandbox:
             self.vm_id, req.language,
         )
 
-        reader, writer = await asyncio.open_unix_connection(self._vsock_path)
+        reader, writer = await open_vsock_connection(self._vsock_path)
         try:
             await send_json(writer, {
                 "language": req.language,
@@ -218,7 +218,7 @@ class FirecrackerSandbox:
         # 1. 커널 설정
         await api_put("/boot-source", {
             "kernel_image_path": _KERNEL_IMAGE,
-            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
+            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off nomodules rw init=/init",
         })
 
         # 2. 루트 파일시스템

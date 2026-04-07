@@ -1,0 +1,22 @@
+#!/bin/sh
+# Firecracker VM 초기화 스크립트
+# 위치: rootfs의 /init
+# boot_args: init=/init
+
+# 기본 파일시스템 마운트
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || {
+    # devtmpfs 없을 경우 최소 디바이스 직접 생성
+    mknod -m 0600 /dev/console c 5 1
+    mknod -m 0666 /dev/null    c 1 3
+    mknod -m 0666 /dev/zero    c 1 5
+    mknod -m 0444 /dev/urandom c 1 9
+}
+
+# 루프백 인터페이스 활성화
+ip link set lo up 2>/dev/null || true
+
+# Guest Agent 시작 (포그라운드)
+# VM 수명은 이 프로세스와 동일합니다
+exec python3 /usr/local/bin/guest_agent.py

@@ -16,6 +16,9 @@ from typing import Any
 _HEADER_FMT = ">I"   # big-endian unsigned int (4 bytes)
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 
+# Firecracker VSock 내 Guest Agent 리스닝 포트
+VSOCK_GUEST_PORT = 52000
+
 
 async def send_json(writer: asyncio.StreamWriter, data: dict[str, Any]) -> None:
     """
@@ -55,3 +58,41 @@ async def recv_json(reader: asyncio.StreamReader) -> dict[str, Any]:
         reader.readexactly(length), timeout=30.0
     )
     return json.loads(payload_bytes.decode("utf-8"))
+
+
+async def open_vsock_connection(
+    uds_path: str,
+    port: int = VSOCK_GUEST_PORT,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """
+    Firecracker VSock UDS 프록시를 통해 guest에 연결합니다.
+
+    Firecracker UDS 핸드셰이크 프로토콜:
+      Host → "CONNECT {port}\\n"
+      Host ← "OK {local_port}\\n"
+    핸드셰이크 완료 후 일반 스트림처럼 send_json / recv_json을 사용합니다.
+
+    Args:
+        uds_path: Firecracker VSock UDS 소켓 경로 (예: /tmp/fc-vsock-abc123.sock)
+        port: guest agent 리스닝 포트 (기본: VSOCK_GUEST_PORT=52000)
+
+    Returns:
+        (reader, writer) 튜플
+
+    Raises:
+        RuntimeError: 핸드셰이크 실패
+        asyncio.TimeoutError: 응답 타임아웃
+    """
+    reader, writer = await asyncio.open_unix_connection(uds_path)
+
+    # Firecracker UDS 핸드셰이크
+    writer.write(f"CONNECT {port}\n".encode())
+    await writer.drain()
+
+    ack = await asyncio.wait_for(reader.readline(), timeout=5.0)
+    if not ack.startswith(b"OK "):
+        writer.close()
+        await writer.wait_closed()
+        raise RuntimeError(f"VSock 핸드셰이크 실패: {ack!r}")
+
+    return reader, writer
