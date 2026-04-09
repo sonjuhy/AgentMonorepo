@@ -164,6 +164,7 @@ AGENT_TIMEOUT_MAP: dict[str, int] = {
     "archive_agent": 120,
     "communication_agent": 30,
     "sandbox_agent": 60,
+    "agent_builder": 120,   # 로컬 빌드 (패키지 검증 포함), Redis 큐 미사용
 }
 
 # 재시도 가능한 에러 코드
