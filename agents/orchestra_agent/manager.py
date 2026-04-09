@@ -253,14 +253,25 @@ class OrchestraManager:
     async def _route_single(self, nlu_result: SingleNLUResult, task: OrchestraTask) -> None:
         """단일 에이전트 작업을 라우팅합니다."""
         agent_name = nlu_result.selected_agent
+        dispatch_task_id = str(uuid.uuid4())
+
+        # ── 로컬 직접 실행 에이전트 (Redis 큐 미사용) ────────────────────────
+        if agent_name == "agent_builder":
+            result = await self._run_agent_builder(
+                nlu_result.params, dispatch_task_id
+            )
+            await self._handle_agent_result(
+                result, task, nlu_result.metadata.requires_user_approval
+            )
+            return
+
+        # ── 일반 에이전트: Circuit Breaker → Dispatch → Wait ─────────────────
         timeout = AGENT_TIMEOUT_MAP.get(agent_name, 300)
 
-        # Circuit Breaker 확인
         if await self._health.check_circuit_breaker(agent_name):
             await self._send_fallback_message(task, agent_name)
             return
 
-        dispatch_task_id = str(uuid.uuid4())
         dispatch = _build_dispatch_message(
             task_id=dispatch_task_id,
             session_id=task["session_id"],
@@ -282,6 +293,18 @@ class OrchestraManager:
         # 결과 수신 대기
         result = await self.wait_for_result(dispatch_task_id, timeout=timeout)
         await self._handle_agent_result(result, task, nlu_result.metadata.requires_user_approval)
+
+    async def _run_agent_builder(
+        self, params: dict[str, Any], task_id: str
+    ) -> dict[str, Any]:
+        """
+        AgentBuilderHandler를 직접 호출합니다 (Redis 큐 불필요).
+        tools/agent_builder/가 모노리포 루트에 존재해야 합니다.
+        """
+        from .agent_builder_handler import AgentBuilderHandler
+        handler = AgentBuilderHandler()
+        logger.info("[Manager] AgentBuilder 로컬 실행 task_id=%s", task_id)
+        return await handler.build_agent(params, task_id)
 
     # ── 복합 작업 플래너 ──────────────────────────────────────────────────────
 

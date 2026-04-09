@@ -38,6 +38,7 @@ _AGENT_CAPABILITIES = """
 - calendar_agent: 구글 캘린더 일정 CRUD (actions: create_event, query_events, update_event, delete_event)
 - file_agent: 로컬 파일 시스템 CRUD·검색 (actions: read_file, write_file, search_files, move_file, copy_file, delete_file)
 - communication_agent: 사용자에게 메시지 발송·질문 (actions: send_message, ask_clarification)
+- agent_builder: Python 또는 JavaScript 코드와 패키지 목록으로 새 에이전트를 자동 생성·패키징 (actions: build_agent, params: name[필수]/language["python"|"javascript"]/code[필수]/packages[]/port[int]/description[str]/force[bool])
 """.strip()
 
 _SYSTEM_PROMPT_TEMPLATE = """\
