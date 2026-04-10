@@ -130,7 +130,69 @@ def main(argv: list[str] | None = None) -> int:
         help="에이전트 설명 (선택)",
     )
 
-    # ── 옵션 ──────────────────────────────────────────────────────────────────
+    # ── 권한 설정 ────────────────────────────────────────────────────────────
+    perm_group = parser.add_argument_group(
+        "권한 설정",
+        "컨테이너 보안·리소스 설정 (기본값: standard 프리셋)"
+    )
+    perm_group.add_argument(
+        "--permission-preset",
+        choices=["minimal", "standard", "trusted"],
+        default="standard",
+        metavar="{minimal,standard,trusted}",
+        help=(
+            "권한 프리셋 (기본값: standard)\n"
+            "  minimal  — 네트워크 차단 · 읽기 전용 · 256MB\n"
+            "  standard — 내부 네트워크 · 읽기 전용 · 512MB\n"
+            "  trusted  — 전체 네트워크 · 읽기/쓰기 · 1GB"
+        ),
+    )
+    perm_group.add_argument(
+        "--network",
+        choices=["none", "internal", "full"],
+        default=None,
+        help="네트워크 접근 (프리셋 override). none=차단, internal=내부전용, full=허용",
+    )
+    perm_group.add_argument(
+        "--readwrite",
+        action="store_true",
+        help="파일시스템 읽기/쓰기 허용 (기본: 읽기 전용)",
+    )
+    perm_group.add_argument(
+        "--memory-mb",
+        type=int,
+        default=None,
+        metavar="MB",
+        help="메모리 제한 MB (프리셋 override)",
+    )
+    perm_group.add_argument(
+        "--cpu",
+        type=float,
+        default=None,
+        metavar="CORES",
+        help="CPU 코어 수 제한 (프리셋 override)",
+    )
+    perm_group.add_argument(
+        "--pids-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="최대 프로세스 수 (프리셋 override)",
+    )
+    perm_group.add_argument(
+        "--cap-add",
+        nargs="*",
+        default=[],
+        metavar="CAP",
+        help="추가 Linux Capability (예: NET_BIND_SERVICE CHOWN)",
+    )
+    perm_group.add_argument(
+        "--allow-root",
+        action="store_true",
+        help="루트 사용자로 실행 (비권장, 기본: 비루트 appuser)",
+    )
+
+    # ── 기타 옵션 ────────────────────────────────────────────────────────────
     parser.add_argument(
         "--force", "-f",
         action="store_true",
@@ -174,11 +236,32 @@ def main(argv: list[str] | None = None) -> int:
     else:
         code = args.code_inline
 
+    # ── 권한 설정 구성 ────────────────────────────────────────────────────────
+    from .permissions import ContainerPermissions
+    permissions = ContainerPermissions.from_preset(args.permission_preset)
+    # 개별 override 적용
+    if args.network is not None:
+        permissions.network = args.network
+    if args.readwrite:
+        permissions.filesystem = "readwrite"
+    if args.memory_mb is not None:
+        permissions.memory_mb = args.memory_mb
+    if args.cpu is not None:
+        permissions.cpu_limit = args.cpu
+    if args.pids_limit is not None:
+        permissions.pids_limit = args.pids_limit
+    if args.cap_add:
+        permissions.extra_capabilities = list(args.cap_add)
+    if args.allow_root:
+        permissions.run_as_nonroot = False
+
     # ── 빌드 실행 ─────────────────────────────────────────────────────────────
     repo_root = Path(args.repo_root) if args.repo_root else None
     builder = AgentBuilder(repo_root=repo_root)
 
     print(f"\n에이전트 빌드 시작: {args.name} ({args.language})")
+    print(f"권한 프리셋: {args.permission_preset}")
+    print(permissions.summary())
 
     if not args.no_validate:
         print("유효성 검사 중...")
@@ -199,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             packages=args.packages or [],
             port=args.port,
             description=args.description,
+            permissions=permissions,
             validate_code=False,  # 위에서 이미 검사 완료
             force=args.force,
         )

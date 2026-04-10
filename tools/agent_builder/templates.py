@@ -703,6 +703,7 @@ COPY ./agents/<<<SNAKE_NAME>>>_agent /app/agents/<<<SNAKE_NAME>>>_agent
 
 RUN pip install --no-cache-dir -r /app/agents/<<<SNAKE_NAME>>>_agent/requirements.txt
 
+<<<DOCKERFILE_USER_SETUP>>>
 CMD ["python", "-m", "agents.<<<SNAKE_NAME>>>_agent.main"]
 '''
 
@@ -727,6 +728,7 @@ RUN pip install --no-cache-dir -r /app/agents/<<<SNAKE_NAME>>>_agent/requirement
 # Node.js 의존성
 RUN cd /app/agents/<<<SNAKE_NAME>>>_agent && npm install --production
 
+<<<DOCKERFILE_USER_SETUP>>>
 CMD ["python", "-m", "agents.<<<SNAKE_NAME>>>_agent.main"]
 '''
 
@@ -746,4 +748,5 @@ COMPOSE_SNIPPET = '''\
       - PORT=<<<PORT>>>
     ports:
       - "<<<PORT>>>:<<<PORT>>>"
+<<<COMPOSE_SECURITY>>>
 '''
