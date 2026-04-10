@@ -114,12 +114,15 @@ class DockerSandbox:
             "--rm",
             "--network=none",
             f"--memory={req.memory_mb}m",
-            "--memory-swap=0",          # swap 비활성화
+            "--memory-swap=0",                  # swap 비활성화
             "--cpus=1",
             "--read-only",
             "--tmpfs=/tmp:size=64m",
             "--no-healthcheck",
             "--security-opt=no-new-privileges",
+            "--cap-drop=ALL",                   # 모든 Linux Capability 제거
+            "--pids-limit=64",                  # 프로세스 폭발(fork bomb) 방지
+            "--user=65534:65534",               # nobody:nobody (비루트 실행)
             f"--name=sandbox-{self.vm_id}",
         ]
 
