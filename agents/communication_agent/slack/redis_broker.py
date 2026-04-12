@@ -36,11 +36,14 @@ class RedisBroker:
     """
 
     def __init__(self, url: str | None = None) -> None:
-        redis_url = url or os.environ.get("REDIS_URL", "redis://localhost:6379")
+        redis_url = url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+        if "localhost" in redis_url:
+            redis_url = redis_url.replace("localhost", "127.0.0.1")
+            
         self._client: aioredis.Redis = aioredis.from_url(
             redis_url,
             decode_responses=True,
-            socket_timeout=5.0,
+            socket_timeout=60.0,
             socket_connect_timeout=5.0,
         )
 
@@ -181,6 +184,18 @@ class RedisBroker:
             return True
         except Exception:
             return False
+
+    async def update_agent_health(self, agent_name: str, fields: dict[str, str]) -> None:
+        """
+        agent:{agent_name}:health Hash를 갱신합니다 (하트비트 전송용).
+
+        Args:
+            agent_name: 에이전트 이름 (예: "communication_agent")
+            fields: 저장할 헬스 필드 딕셔너리
+        """
+        key = f"agent:{agent_name}:health"
+        await self._client.hset(key, mapping=fields)
+        await self._client.expire(key, 60)
 
     async def close(self) -> None:
         """Redis 연결을 종료합니다."""

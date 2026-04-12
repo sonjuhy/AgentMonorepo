@@ -81,7 +81,7 @@ class SlackCommAgent:
         REDIS_URL             : Redis 접속 URL (기본값: redis://localhost:6379)
     """
 
-    agent_name: str = "communication-agent"
+    agent_name: str = "communication_agent"
 
     def __init__(
         self,
@@ -116,6 +116,7 @@ class SlackCommAgent:
             self._web_client = AsyncWebClient(token=bot_token)
 
         self._redis: RedisBroker | None = redis
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     # ── 권한 확인 ──────────────────────────────────────────────────────────────
 
@@ -129,12 +130,9 @@ class SlackCommAgent:
         """
         Slack 메시지를 수신하여 정제 후 오케스트라 Redis 큐로 전달합니다.
 
-        처리 흐름:
-            1. 권한 확인
-            2. MessageCleaner로 @bot 멘션 등 제거
-            3. 세션 기반 Slack 스레드 생성 또는 조회
-            4. Redis agent:orchestra:tasks에 OrchestraTask 삽입
-            5. 접수 확인 메시지 전송
+        변경 사항:
+            - 세션 단위 스레드 캐싱 제거
+            - 사용자의 현재 메시지에 대해 스레드로 응답 (또는 이미 스레드면 유지)
         """
         user_id: str = event["user"]
         channel_id: str = event["channel"]
@@ -152,22 +150,20 @@ class SlackCommAgent:
             logger.warning("[CommAgent] Redis 미설정 — on_user_request 건너뜀")
             return
 
-        # 세션 ID: user_id + channel_id 조합
+        # 사용자의 현재 메시지에 스레드로 답변 (이미 스레드 내부라면 해당 스레드 유지)
+        # 만약 스레드 없이 새 메시지로만 하고 싶다면 thread_ts = None 으로 설정하면 됩니다.
+        thread_ts = event.get("thread_ts") or ts
+
+        await self._web_client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="⏳ 요청을 접수했습니다. 처리 중입니다...",
+        )
+
+        # 세션 ID: NLU 컨텍스트용
         session_id = f"{user_id}:{channel_id}"
 
-        # 기존 스레드가 없으면 새 스레드 루트 생성
-        thread_ts = await self._redis.get_thread_ts(session_id)
-        if thread_ts is None:
-            resp = await self._web_client.chat_postMessage(
-                channel=channel_id,
-                text="⏳ 요청을 접수했습니다. 처리 중입니다...",
-            )
-            thread_ts = resp["ts"]
-            await self._redis.save_thread_ts(session_id, thread_ts)
-        else:
-            await say(text="⏳ 요청을 접수했습니다. 처리 중입니다...", thread_ts=thread_ts)
-
-        # 오케스트라 큐에 전달
+        # 오케스트라 큐에 전달 (현재 메시지의 thread_ts 전달)
         task_id = await self._redis.push_to_orchestra(
             user_id=user_id,
             channel_id=channel_id,
@@ -175,7 +171,7 @@ class SlackCommAgent:
             thread_ts=thread_ts,
         )
 
-        # 태스크 컨텍스트 저장 (버튼 클릭 시 채널/스레드 복원용)
+        # 태스크 컨텍스트 저장 (결과 수신 시 정확한 채널/스레드로 복원)
         await self._redis.save_task_context(task_id, {
             "channel_id": channel_id,
             "thread_ts": thread_ts,
@@ -184,10 +180,10 @@ class SlackCommAgent:
         })
 
         logger.info(
-            "[CommAgent] 오케스트라 전달 — task_id=%s user=%s text=%.60s",
+            "[CommAgent] 오케스트라 전달 — task_id=%s user=%s thread_ts=%s",
             task_id,
             user_id,
-            clean_text,
+            thread_ts,
         )
 
     # ── Outbound: 시스템 결과 수신 루프 ───────────────────────────────────────
@@ -196,33 +192,54 @@ class SlackCommAgent:
         """
         Redis agent:communication:tasks 큐를 모니터링하여
         오케스트라 결과를 Slack Block Kit으로 렌더링합니다.
-
-        FastAPI lifespan에서 asyncio.Task로 실행되는 백그라운드 루프입니다.
         """
         if self._redis is None:
             logger.warning("[CommAgent] Redis 미설정 — listen_system_results 종료")
             return
 
+        # 백그라운드 하트비트 시작 (참조 보관으로 GC 방지)
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(), name="comm_agent_heartbeat"
+        )
+
         logger.info("[CommAgent] Redis 결과 리스너 시작 (queue=%s)", "agent:communication:tasks")
         while True:
             try:
                 result = await self._redis.blpop_comm_task(timeout=5.0)
-                if result is None:
-                    continue
-                await self._handle_system_result(result)
+                if result:
+                    await self._handle_system_result(result)
             except asyncio.CancelledError:
-                logger.info("[CommAgent] Redis 결과 리스너 종료")
                 break
             except Exception as exc:
                 logger.error("[CommAgent] 결과 처리 오류: %s", exc)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(1)
+
+    async def _heartbeat_loop(self) -> None:
+        """15초마다 Orchestra Agent에 생존 신호를 기록합니다 (유효 시간 30초)."""
+        from datetime import datetime, timezone
+        logger.info("[CommAgent] 하트비트 루프 시작 (agent=%s)", self.agent_name)
+        while True:
+            try:
+                if self._redis:
+                    await self._redis.update_agent_health(
+                        self.agent_name,
+                        {
+                            "status": "IDLE",
+                            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                            "version": "1.0.0",
+                        },
+                    )
+                    logger.debug("[CommAgent] 하트비트 전송 완료 (agent=%s)", self.agent_name)
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("[CommAgent] 하트비트 전송 실패: %s", e)
+                await asyncio.sleep(5)
 
     async def _handle_system_result(self, result: dict[str, Any]) -> None:
         """
         수신된 OrchestraResult를 파싱하고 Slack으로 전송합니다.
-
-        진행 중(progress_percent not None)이면 기존 진행 메시지를 chat_update로 수정합니다.
-        완료(progress_percent is None)이면 최종 결과를 새 메시지 또는 승인 UI로 전송합니다.
         """
         task_id: str = result.get("task_id", "")
         content: str = result.get("content", "")
@@ -238,12 +255,11 @@ class SlackCommAgent:
 
         channel_id: str = ctx["channel_id"]
         thread_ts: str = ctx["thread_ts"]
-        session_id: str = ctx["session_id"]
-
-        # 진행 상태 업데이트
+        
+        # 진행 상태 업데이트 (task_id를 사용하여 태스크별 진행 메시지 관리)
         if progress_percent is not None:
             await self._post_progress_update(
-                session_id=session_id,
+                task_id=task_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 percent=progress_percent,
@@ -268,21 +284,22 @@ class SlackCommAgent:
 
     async def _post_progress_update(
         self,
-        session_id: str,
+        task_id: str,
         channel_id: str,
         thread_ts: str,
         percent: int,
         message: str,
     ) -> None:
         """
-        진행 상태 메시지를 chat_update로 업데이트합니다 (노이즈 최소화).
-        기존 진행 메시지가 없으면 새로 생성합니다.
+        진행 상태 메시지를 chat_update로 업데이트합니다.
+        세션 단위가 아닌 태스크 단위(task_id)로 관리하여 충돌을 방지합니다.
         """
         if self._redis is None:
             return
 
         progress_text = f"🔄 {message} ({percent}%)"
-        existing_ts = await self._redis.get_progress_msg_ts(session_id)
+        # task_id를 키로 사용하여 현재 태스크의 진행 메시지만 추적
+        existing_ts = await self._redis.get_progress_msg_ts(task_id)
 
         if existing_ts:
             try:
@@ -293,14 +310,14 @@ class SlackCommAgent:
                 )
                 return
             except SlackApiError:
-                pass  # 메시지가 삭제된 경우 새로 생성
+                pass
 
         resp = await self._web_client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
             text=progress_text,
         )
-        await self._redis.save_progress_msg_ts(session_id, resp["ts"])
+        await self._redis.save_progress_msg_ts(task_id, resp["ts"])
 
     # ── Block Kit 빌더 ────────────────────────────────────────────────────────
 

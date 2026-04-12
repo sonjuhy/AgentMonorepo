@@ -11,9 +11,9 @@ from ..models import AgentName, ExecutionResult, SlackEvent
 
 # 에이전트 서비스 이름 → Docker 이미지 이름 매핑
 # 환경변수 AGENT_IMAGE_{AGENT_NAME_UPPER} 로 재정의 가능
-# 예) AGENT_IMAGE_PLANNING_AGENT=myrepo/planning_agent:latest
+# 예) AGENT_IMAGE_ARCHIVE_AGENT=myrepo/archive_agent:latest
 _DEFAULT_IMAGE_MAP: dict[str, str] = {
-    "planning_agent": "agentmonorepo-planning_agent",
+    "archive_agent": "agentmonorepo-archive_agent",
     "slack_agent": "agentmonorepo-slack_agent",
 }
 

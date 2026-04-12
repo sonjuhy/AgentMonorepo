@@ -13,7 +13,7 @@ type AgentName = str
 
 # 에이전트 레지스트리: 에이전트 이름 → 역할 설명
 AGENT_REGISTRY: dict[str, str] = {
-    "planning_agent": "소프트웨어 기획, 요구사항 분석, 설계 문서 작성, 태스크 분해 요청을 처리합니다.",
+    "archive_agent": "소프트웨어 기획, 요구사항 분석, 설계 문서 작성, 태스크 분해 요청을 처리합니다.",
     "slack_agent": "Slack 알림 발송, 메시지 전달 등 커뮤니케이션 요청을 처리합니다.",
 }
 

@@ -42,7 +42,10 @@ LOG_CONFIG = {
         "uvicorn.error": {"level": "INFO", "propagate": True},
         "uvicorn.access": {"level": "INFO", "propagate": True},
         "slack_agent": {"level": "INFO", "propagate": True},
-        "slack_bolt": {"level": "WARNING", "propagate": True},  # slack_bolt 내부 로그 간소화
+        "slack_bolt": {
+            "level": "WARNING",
+            "propagate": True,
+        },  # slack_bolt 내부 로그 간소화
     },
 }
 
@@ -61,7 +64,7 @@ def main() -> None:
     print(f"{'='*50}\n")
 
     uvicorn.run(
-        "agents.slack_agent.slack.fastapi_app:app",
+        "agents.communication_agent.slack.fastapi_app:app",
         host=host,
         port=port,
         reload=False,
