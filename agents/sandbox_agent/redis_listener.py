@@ -21,6 +21,7 @@ from .agent import SandboxAgent
 
 logger = logging.getLogger("sandbox_agent.redis_listener")
 
+_AGENT_NAME = "sandbox_agent"
 _QUEUE_KEY = "agent:sandbox:tasks"
 _HEALTH_KEY = "agent:sandbox:health"
 _HEARTBEAT_INTERVAL = 15         # 초
@@ -98,58 +99,71 @@ class SandboxRedisListener:
     async def handle_task(self, raw: str) -> None:
         """
         수신한 JSON 문자열을 파싱하고 SandboxAgent에 위임한 뒤 결과를 보고합니다.
+        CancelledError 포함 모든 경로에서 반드시 오케스트라로 결과를 전송합니다.
 
         Args:
             raw: BLPOP으로 받은 직렬화된 JSON 문자열 (DispatchMessage 형식).
         """
         task_id = "unknown"
+        agent_result: dict[str, Any] = {
+            "task_id": "unknown",
+            "agent": _AGENT_NAME,
+            "status": "FAILED",
+            "result_data": {},
+            "error": {"code": "INTERNAL_ERROR", "message": "처리 중 알 수 없는 오류", "traceback": None},
+            "usage_stats": {},
+        }
         try:
             dispatch_msg: dict[str, Any] = json.loads(raw)
             task_id = dispatch_msg.get("task_id", "unknown")
+            agent_result["task_id"] = task_id
             logger.info("[SandboxRedisListener] 태스크 수신: task_id=%s", task_id)
 
             self._current_task_count += 1
             await self._update_health("BUSY")
 
-            agent_result: dict[str, Any] = await self._agent.handle_dispatch(dispatch_msg)
+            result = await self._agent.handle_dispatch(dispatch_msg)
+            agent_result = {**result, "agent": _AGENT_NAME, "task_id": task_id}
 
         except json.JSONDecodeError as exc:
             logger.error("[SandboxRedisListener] JSON 파싱 실패: %s", exc)
-            agent_result = {
-                "task_id": task_id,
-                "status": "FAILED",
-                "result_data": {},
+            agent_result.update({
                 "error": {"code": "PARSE_ERROR", "message": str(exc), "traceback": None},
-                "usage_stats": {},
-            }
+            })
+        except asyncio.CancelledError:
+            logger.warning("[SandboxRedisListener] 태스크 취소됨: task_id=%s", task_id)
+            agent_result.update({
+                "error": {"code": "CANCELLED", "message": "태스크가 취소되었습니다.", "traceback": None},
+            })
+            raise
         except Exception as exc:
             logger.error(
                 "[SandboxRedisListener] 태스크 처리 실패 task_id=%s: %s", task_id, exc
             )
-            agent_result = {
-                "task_id": task_id,
-                "status": "FAILED",
-                "result_data": {},
+            agent_result.update({
                 "error": {"code": "INTERNAL_ERROR", "message": str(exc), "traceback": None},
-                "usage_stats": {},
-            }
+            })
         finally:
             self._current_task_count = max(0, self._current_task_count - 1)
             if self._current_task_count == 0:
                 await self._update_health("IDLE")
-
-        await self._report_result(
-            task_id=agent_result.get("task_id", task_id),
-            result_data=agent_result.get("result_data", {}),
-            status=agent_result.get("status", "FAILED"),
-            error=agent_result.get("error"),
-        )
+            try:
+                await self._report_result(
+                    task_id=agent_result.get("task_id", task_id),
+                    agent=agent_result.get("agent", _AGENT_NAME),
+                    result_data=agent_result.get("result_data", {}),
+                    status=agent_result.get("status", "FAILED"),
+                    error=agent_result.get("error"),
+                )
+            except Exception as exc:
+                logger.error("[SandboxRedisListener] 결과 보고 실패 task_id=%s: %s", task_id, exc)
 
     # ── 결과 보고 ──────────────────────────────────────────────────────────────
 
     async def _report_result(
         self,
         task_id: str,
+        agent: str,
         result_data: dict[str, Any],
         status: str,
         error: dict[str, Any] | None,
@@ -160,6 +174,7 @@ class SandboxRedisListener:
         """
         payload = {
             "task_id": task_id,
+            "agent": agent,
             "status": status,
             "result_data": result_data,
             "error": error,

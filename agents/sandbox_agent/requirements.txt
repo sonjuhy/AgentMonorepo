@@ -13,5 +13,8 @@ uvicorn[standard]>=0.30.0
 # Pydantic v2 (요청 바디 검증)
 pydantic>=2.7.0
 
-# 환경변수 로딩
+# Environment variables
 python-dotenv>=1.0.0
+
+# Docker (for sandbox containers)
+docker>=7.1.0
