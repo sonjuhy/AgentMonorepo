@@ -9,10 +9,10 @@ WORKDIR /app
 
 # 프로젝트 루트에서 필요한 모듈만 이미지 내부로 복사 (모노리포 구조)
 COPY ./shared_core /app/shared_core
-COPY ./agents/planning_agent /app/agents/planning_agent
+COPY ./agents/archive_agent /app/agents/archive_agent
 
 # (선택) requirements 등 파이썬 의존성 설치
-# RUN pip install --no-cache-dir -r /app/agents/planning_agent/requirements.txt
+# RUN pip install --no-cache-dir -r /app/agents/archive_agent/requirements.txt
 
 # 진입점 설정: 데몬 또는 무한 대기 상태가 아닌, 단일 스크립트 실행 후 즉시 종료되도록 구성
-CMD ["python", "-m", "agents.planning_agent.main"]
+CMD ["python", "-m", "agents.archive_agent.main"]

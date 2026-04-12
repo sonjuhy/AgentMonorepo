@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /app/agents/planning_agent/
+COPY . /app/agents/archive_agent/
 
 ENV PYTHONPATH=/app
 ENV MODE=server
@@ -27,4 +27,4 @@ ENV PORT=8002
 
 EXPOSE 8002
 
-CMD ["python", "-m", "agents.planning_agent.main"]
+CMD ["python", "-m", "agents.archive_agent.main"]

@@ -79,7 +79,7 @@ class ClaudeAPITaskAnalyzer:
         async with self._client.messages.stream(
             model=self._model,
             max_tokens=4096,
-            thinking={"type": "adaptive"},
+            thinking={"type": "enabled", "budget_tokens": 2048},
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_prompt(task)}],
         ) as stream:

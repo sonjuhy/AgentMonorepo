@@ -1,8 +1,8 @@
 """
-Planning Agent 추상 인터페이스 (Protocol)
+Archive Agent 추상 인터페이스 (Protocol)
 - python-strict-typing 전략: 엄격한 정적 타입 선언 및 추상 인터페이스
 - ephemeral-docker-ops 전략: 단발성 실행 사이클 계약
-- v2: PlanningRedisListenerProtocol 추가 (Orchestra 연동 모드)
+- v2: ArchiveRedisListenerProtocol 추가 (Orchestra 연동 모드)
 """
 
 from typing import Any, Protocol
@@ -10,9 +10,9 @@ from typing import Any, Protocol
 from .models import ExecutionResult, ParsedTask, PlanningTaskResult, RawPayload
 
 
-class PlanningAgentProtocol(Protocol):
+class ArchiveAgentProtocol(Protocol):
     """
-    Planning Agent의 동작을 정의하는 추상 인터페이스입니다.
+    Archive Agent의 동작을 정의하는 추상 인터페이스입니다.
     이 에이전트는 무한 루프나 데몬 없이, 스케줄링된 1회 실행 주기를 갖습니다.
     (ephemeral 모드: cron 스케줄러 또는 직접 실행용)
     """
@@ -31,7 +31,7 @@ class PlanningAgentProtocol(Protocol):
 
     async def process_task(self, task_data: ParsedTask) -> ExecutionResult:
         """
-        개별 작업에 대하여 기획 에이전트의 구체적 로직을 단발성으로 수행합니다.
+        개별 작업에 대하여 아카이브 에이전트의 구체적 로직을 단발성으로 수행합니다.
 
         Args:
             task_data (ParsedTask): 파싱 완료된 작업 데이터.
@@ -50,20 +50,20 @@ class PlanningAgentProtocol(Protocol):
         ...
 
 
-class PlanningRedisListenerProtocol(Protocol):
+class ArchiveRedisListenerProtocol(Protocol):
     """
     OrchestraManager Redis 큐 수신 모드 인터페이스.
 
-    - Inbound:  BLPOP agent:planning:tasks  (DispatchMessage 형식)
+    - Inbound:  BLPOP agent:archive_agent:tasks  (DispatchMessage 형식)
     - Outbound: HTTP POST {orchestra_url}/results  (AgentResult 형식)
-    - Health:   Redis Hash agent:planning:health  (15초 주기 heartbeat)
+    - Health:   Redis Hash agent:archive_agent:health  (15초 주기 heartbeat)
 
     FastAPI lifespan에서 asyncio.Task로 실행되는 백그라운드 루프입니다.
     """
 
     async def listen_tasks(self) -> None:
         """
-        agent:planning:tasks 큐를 BLPOP으로 감시하는 메인 루프.
+        agent:archive_agent:tasks 큐를 BLPOP으로 감시하는 메인 루프.
         각 태스크를 handle_task()로 처리하며, CancelledError를 감지하여 정상 종료한다.
         """
         ...
@@ -71,7 +71,7 @@ class PlanningRedisListenerProtocol(Protocol):
     async def handle_task(self, raw: str) -> None:
         """
         Redis에서 수신한 JSON 문자열을 DispatchMessage로 파싱하고
-        PlanningAgent.handle_dispatch()에 위임한 뒤 결과를 보고한다.
+        ArchiveAgent.handle_dispatch()에 위임한 뒤 결과를 보고한다.
 
         Args:
             raw: BLPOP으로 수신한 직렬화된 JSON 문자열.
@@ -98,7 +98,7 @@ class PlanningRedisListenerProtocol(Protocol):
 
     async def _heartbeat_loop(self) -> None:
         """
-        15초 주기로 agent:planning:health Redis Hash를 갱신한다.
+        15초 주기로 agent:archive_agent:health Redis Hash를 갱신한다.
         OrchestraManager의 HealthMonitor가 이 값을 읽어 가용 여부를 판단한다.
         """
         ...

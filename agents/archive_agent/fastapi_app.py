@@ -1,11 +1,11 @@
 """
-Planning Agent FastAPI 서버 (server 모드)
+Archive Agent FastAPI 서버 (server 모드)
 - GET  /health       : 에이전트 상태 조회
 - POST /execute      : Redis 우회 직접 실행 (개발/테스트용)
 
 Lifespan 백그라운드:
-    - PlanningRedisListener.listen_tasks()  — BLPOP 큐 감시
-    - PlanningRedisListener._heartbeat_loop() — 15초 주기 health 갱신
+    - ArchiveRedisListener.listen_tasks()  — BLPOP 큐 감시
+    - ArchiveRedisListener._heartbeat_loop() — 15초 주기 health 갱신
 """
 
 from __future__ import annotations
@@ -16,20 +16,23 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .notion.agent import PlanningAgent
+from .notion.agent import ArchiveAgent
 from .notion.task_analyzer import build_task_analyzer
-from .redis_listener import PlanningRedisListener
+from .redis_listener import ArchiveRedisListener
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-logger = logging.getLogger("planning_agent.fastapi_app")
+logger = logging.getLogger("archive_agent.fastapi_app")
 
 
 # ── Pydantic 요청 바디 ─────────────────────────────────────────────────────────
@@ -49,8 +52,8 @@ class ExecuteRequest(BaseModel):
 # ── Application Context ────────────────────────────────────────────────────────
 
 class _AppContext:
-    agent: PlanningAgent
-    listener: PlanningRedisListener
+    agent: ArchiveAgent
+    listener: ArchiveRedisListener
     listen_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
 
@@ -63,29 +66,29 @@ _ctx = _AppContext()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI 수명 주기: 초기화 → 백그라운드 시작 → 종료."""
-    logger.info("[Lifespan] Planning Agent 서버 시작")
+    logger.info("[Lifespan] Archive Agent 서버 시작")
 
-    _ctx.agent = PlanningAgent(task_analyzer=build_task_analyzer())
-    _ctx.listener = PlanningRedisListener(
-        planning_agent=_ctx.agent,
+    _ctx.agent = ArchiveAgent(task_analyzer=build_task_analyzer())
+    _ctx.listener = ArchiveRedisListener(
+        archive_agent=_ctx.agent,
         redis_url=os.environ.get("REDIS_URL"),
         orchestra_url=os.environ.get("ORCHESTRA_URL"),
     )
 
     _ctx.listen_task = asyncio.create_task(
         _ctx.listener.listen_tasks(),
-        name="planning_listen_tasks",
+        name="archive_listen_tasks",
     )
     _ctx.heartbeat_task = asyncio.create_task(
         _ctx.listener._heartbeat_loop(),
-        name="planning_heartbeat",
+        name="archive_heartbeat",
     )
     logger.info("[Lifespan] 백그라운드 태스크 시작됨")
 
     yield
 
     # 종료
-    logger.info("[Lifespan] Planning Agent 서버 종료 시작")
+    logger.info("[Lifespan] Archive Agent 서버 종료 시작")
     for task in (_ctx.listen_task, _ctx.heartbeat_task):
         if task and not task.done():
             task.cancel()
@@ -95,15 +98,15 @@ async def lifespan(app: FastAPI):
                 pass
 
     await _ctx.listener.close()
-    logger.info("[Lifespan] Planning Agent 서버 종료 완료")
+    logger.info("[Lifespan] Archive Agent 서버 종료 완료")
 
 
 # ── FastAPI 앱 ─────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Planning Agent",
+    title="Archive Agent",
     version="2.0.0",
-    description="AI 기획 에이전트 — Notion/Obsidian 태스크 분석 및 기획 문서 생성",
+    description="AI 아카이브 에이전트 — Notion/Obsidian 태스크 분석 및 기획 문서 생성",
     lifespan=lifespan,
 )
 
@@ -131,7 +134,7 @@ async def health_check() -> dict[str, Any]:
 @app.post("/execute", status_code=status.HTTP_202_ACCEPTED)
 async def direct_execute(req: ExecuteRequest) -> dict[str, Any]:
     """
-    Redis 큐를 우회하여 직접 기획 태스크를 실행합니다.
+    Redis 큐를 우회하여 직접 아카이브 태스크를 실행합니다.
     개발/테스트 환경에서 사용합니다.
     """
     try:
@@ -164,7 +167,7 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8002"))
     uvicorn.run(
-        "agents.planning_agent.fastapi_app:app",
+        "agents.archive_agent.fastapi_app:app",
         host=host,
         port=port,
         reload=False,

@@ -1,5 +1,5 @@
 """
-Planning Agent 구체 구현체
+Archive Agent 구체 구현체
 - Notion API 연동 및 태스크 처리 로직
 - ephemeral-docker-ops 전략: 단발성 실행 후 자연 종료
 - v2: handle_dispatch() 추가 — OrchestraManager DispatchMessage 처리
@@ -25,13 +25,13 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
 
-class PlanningAgent:
+class ArchiveAgent:
     """
-    PlanningAgentProtocol의 구체 구현체.
+    ArchiveAgentProtocol의 구체 구현체.
     환경 변수에서 Notion 인증 정보를 읽어 API를 호출합니다.
     """
 
-    agent_name: str = "planning-agent"
+    agent_name: str = "archive_agent"
 
     def __init__(self, task_analyzer: TaskAnalyzerProtocol | None = None) -> None:
         self._token: str = os.environ["NOTION_TOKEN"]
@@ -217,7 +217,7 @@ class PlanningAgent:
                 "status": "검토중",
                 "github_pr": "",
                 "design_doc": "",
-                "agent_assignees": ["planning-agent"],
+                "agent_assignees": ["archive_agent"],
                 "assignees": [],
                 "skeleton_code": "",
                 "priority": params.get("priority", ""),

@@ -63,7 +63,7 @@ def _set_frontmatter_key(content: str, key: str, value: str) -> str:
     return f"---\n{new_fm}\n---\n{rest}"
 
 
-class ObsidianPlanningAgent:
+class ObsidianArchiveAgent:
     """
     Obsidian 볼트 내 마크다운 파일을 파싱하여 기획 태스크를 처리하는 에이전트.
 
@@ -71,7 +71,7 @@ class ObsidianPlanningAgent:
     찾아 LLM으로 기획안을 생성하고, 파일 본문과 메타데이터를 업데이트합니다.
     """
 
-    agent_name: str = "obsidian-planning-agent"
+    agent_name: str = "obsidian-archive-agent"
 
     def __init__(
         self,
@@ -114,7 +114,7 @@ class ObsidianPlanningAgent:
         fm_match = _FRONTMATTER_RE.match(file_content)
         return file_content[fm_match.end():] if fm_match else file_content
 
-    # ── PlanningAgentProtocol 구현 ─────────────────────────────────────────────
+    # ── ArchiveAgentProtocol 구현 ──────────────────────────────────────────────
 
     async def fetch_pending_tasks(self) -> list[RawPayload]:
         """
@@ -185,7 +185,7 @@ class ObsidianPlanningAgent:
                 status=status,
                 github_pr=fm.get("github_pr", ""),
                 design_doc=fm.get("design_doc", ""),
-                agent_assignees=["obsidian-planning-agent"],
+                agent_assignees=["obsidian-archive-agent"],
                 assignees=[],
                 skeleton_code="",
                 priority=priority,

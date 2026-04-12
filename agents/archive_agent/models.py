@@ -32,7 +32,7 @@ class ParsedTask(TypedDict):
 
 class PlanningTaskParams(TypedDict):
     """
-    OrchestraManager가 DispatchMessage.params로 전달하는 planning_agent 전용 스키마.
+    OrchestraManager가 DispatchMessage.params로 전달하는 archive_agent 전용 스키마.
     source에 따라 page_id(Notion) 또는 file_path(Obsidian) 중 하나가 채워진다.
     """
     source: PlanningSource       # "notion" | "obsidian" | "direct"
@@ -47,7 +47,7 @@ class PlanningTaskParams(TypedDict):
 
 class PlanningTaskResult(TypedDict):
     """
-    AgentResult.result_data에 담길 planning_agent 전용 결과 스키마.
+    AgentResult.result_data에 담길 archive_agent 전용 결과 스키마.
     OrchestraManager가 이 구조를 파싱하여 사용자에게 전달한다.
     """
     markdown_doc: str            # 생성된 전체 기획 마크다운
