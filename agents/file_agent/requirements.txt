@@ -1,0 +1,17 @@
+# File Agent Dependencies
+
+# FastAPI & ASGI
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Pydantic v2
+pydantic>=2.7.0
+
+# Redis (async)
+redis[hiredis]>=5.0.0
+
+# HTTP client
+httpx>=0.27.0
+
+# Environment variables
+python-dotenv>=1.0.0

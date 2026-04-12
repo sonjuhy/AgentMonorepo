@@ -1,27 +1,34 @@
 """
 File Agent 구체 구현체
 - FileAgentProtocol 구현: read / write / update / delete
-- Redis 브로커를 통한 메시지 수신 및 결과 발행
-- ephemeral-docker-ops 전략: 메시지 1건 처리 후 자연 종료
+- Redis BLPOP으로 오케스트라 디스패치 수신
+- 처리 결과를 HTTP POST /results 로 오케스트라에 전송
 """
 
+import asyncio
+import json
+import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from shared_core.messaging.broker import RedisMessageBroker
-from shared_core.messaging.schema import AgentMessage
+import httpx
+import redis.asyncio as aioredis
 
 from .config import FileAgentConfig, load_config_from_env
 from .interfaces import FileOperationResult
 from .validator import PathValidator, PathValidatorProtocol
 
+logger = logging.getLogger("file_agent.agent")
+
+_HEARTBEAT_INTERVAL = 15
+_BLPOP_TIMEOUT = 5
+
 
 class FileAgent:
     """
     FileAgentProtocol의 구체 구현체.
-
-    설정된 허용 루트 내에서 파일 CRUD 작업을 수행하고,
-    Redis 브로커로부터 AgentMessage를 수신해 작업을 실행한 뒤 결과를 발신자에게 반환합니다.
     """
 
     agent_name: str = "file-agent"
@@ -34,161 +41,178 @@ class FileAgent:
         self._config = config or load_config_from_env()
         self._validator = validator or PathValidator()
 
-    # ------------------------------------------------------------------ #
-    # FileAgentProtocol 구현                                               #
-    # ------------------------------------------------------------------ #
-
     async def read_file(self, file_path: Path | str) -> FileOperationResult:
-        """허용된 경로의 파일 내용을 읽어 반환합니다."""
         try:
             path = self._validator.resolve_safe_path(file_path, self._config.allowed_roots)
             size_mb = path.stat().st_size / (1024 * 1024)
             if size_mb > self._config.max_file_size_mb:
-                return FileOperationResult(
-                    status="error",
-                    message=(
-                        f"파일 크기 초과: {size_mb:.1f}MB "
-                        f"(최대 {self._config.max_file_size_mb}MB)"
-                    ),
-                )
+                return FileOperationResult(status="error", message=f"파일 크기 초과: {size_mb:.1f}MB")
             content = path.read_text(encoding="utf-8")
             return FileOperationResult(status="success", message="읽기 완료", data=content)
-        except PermissionError as e:
-            return FileOperationResult(status="permission_denied", message=str(e))
-        except FileNotFoundError:
-            return FileOperationResult(
-                status="error", message=f"파일을 찾을 수 없습니다: {file_path}"
-            )
         except Exception as e:
             return FileOperationResult(status="error", message=f"읽기 실패: {e}")
 
-    async def write_file(
-        self,
-        file_path: Path | str,
-        content: str,
-        overwrite: bool = False,
-    ) -> FileOperationResult:
-        """파일을 생성하거나 내용을 씁니다. overwrite=False 이면 기존 파일을 덮어쓰지 않습니다."""
+    async def write_file(self, file_path: Path | str, content: str, overwrite: bool = False) -> FileOperationResult:
         try:
             path = self._validator.resolve_safe_path(file_path, self._config.allowed_roots)
             if path.exists() and not overwrite:
-                return FileOperationResult(
-                    status="error",
-                    message=f"파일이 이미 존재합니다 (overwrite=False): {path}",
-                )
+                return FileOperationResult(status="error", message=f"파일이 이미 존재합니다")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
             return FileOperationResult(status="success", message=f"쓰기 완료: {path}")
-        except PermissionError as e:
-            return FileOperationResult(status="permission_denied", message=str(e))
         except Exception as e:
             return FileOperationResult(status="error", message=f"쓰기 실패: {e}")
 
-    async def update_file(
-        self,
-        file_path: Path | str,
-        content: str,
-        append: bool = True,
-    ) -> FileOperationResult:
-        """기존 파일을 수정합니다. append=True 이면 내용을 뒤에 추가, False 이면 전체 교체합니다."""
+    async def update_file(self, file_path: Path | str, content: str, append: bool = True) -> FileOperationResult:
         try:
             path = self._validator.resolve_safe_path(file_path, self._config.allowed_roots)
             if not path.exists():
-                return FileOperationResult(
-                    status="error", message=f"파일이 존재하지 않습니다: {path}"
-                )
+                return FileOperationResult(status="error", message="파일 없음")
             if append:
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(content)
+                with path.open("a", encoding="utf-8") as f: f.write(content)
             else:
                 path.write_text(content, encoding="utf-8")
-            mode = "추가" if append else "교체"
-            return FileOperationResult(status="success", message=f"업데이트({mode}) 완료: {path}")
-        except PermissionError as e:
-            return FileOperationResult(status="permission_denied", message=str(e))
+            return FileOperationResult(status="success", message="업데이트 완료")
         except Exception as e:
             return FileOperationResult(status="error", message=f"업데이트 실패: {e}")
 
     async def delete_file(self, file_path: Path | str) -> FileOperationResult:
-        """파일을 삭제합니다."""
         try:
             path = self._validator.resolve_safe_path(file_path, self._config.allowed_roots)
-            if not path.exists():
-                return FileOperationResult(
-                    status="error", message=f"파일이 존재하지 않습니다: {path}"
-                )
+            if not path.exists(): return FileOperationResult(status="error", message="파일 없음")
             path.unlink()
-            return FileOperationResult(status="success", message=f"삭제 완료: {path}")
-        except PermissionError as e:
-            return FileOperationResult(status="permission_denied", message=str(e))
+            return FileOperationResult(status="success", message="삭제 완료")
         except Exception as e:
             return FileOperationResult(status="error", message=f"삭제 실패: {e}")
 
-    # ------------------------------------------------------------------ #
-    # 브로커 연동                                                           #
-    # ------------------------------------------------------------------ #
-
-    async def _dispatch(self, message: AgentMessage) -> FileOperationResult:
-        """수신된 AgentMessage의 action에 따라 적절한 파일 작업을 실행합니다."""
-        payload = message.payload
-        action = message.action
-
+    async def _dispatch(self, action: str, payload: dict) -> FileOperationResult:
         match action:
-            case "read_file":
-                return await self.read_file(payload["file_path"])
-            case "write_file":
-                return await self.write_file(
-                    payload["file_path"],
-                    payload["content"],
-                    payload.get("overwrite", False),
+            case "read_file": return await self.read_file(payload["file_path"])
+            case "write_file": return await self.write_file(payload["file_path"], payload["content"], payload.get("overwrite", False))
+            case "update_file": return await self.update_file(payload["file_path"], payload["content"], payload.get("append", True))
+            case "delete_file": return await self.delete_file(payload["file_path"])
+            case _: return FileOperationResult(status="error", message=f"알 수 없는 액션: {action}")
+
+    async def _report_result(
+        self,
+        orchestra_url: str,
+        task_id: str,
+        status: str,
+        result_data: dict[str, Any],
+        error: dict[str, Any] | None,
+    ) -> None:
+        """처리 결과를 오케스트라 /results 엔드포인트로 전송합니다. 최대 3회 재시도."""
+        payload = {
+            "task_id": task_id,
+            "agent": self.agent_name,
+            "status": status,
+            "result_data": result_data,
+            "error": error,
+            "usage_stats": {},
+        }
+        url = f"{orchestra_url}/results"
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(url, json=payload)
+                    resp.raise_for_status()
+                logger.info("[FileAgent] 결과 보고 완료: task_id=%s status=%s", task_id, status)
+                return
+            except Exception as exc:
+                wait = 2 ** attempt
+                logger.warning("[FileAgent] 결과 보고 실패 (attempt %d/3): %s — %ds 후 재시도", attempt + 1, exc, wait)
+                if attempt < 2:
+                    await asyncio.sleep(wait)
+        logger.error("[FileAgent] 결과 보고 최종 실패: task_id=%s", task_id)
+
+    async def _handle_task(self, raw: str, orchestra_url: str) -> None:
+        """BLPOP으로 수신한 DispatchMessage를 처리하고 결과를 오케스트라로 전송합니다."""
+        task_id = "unknown"
+        agent_result: dict[str, Any] = {
+            "status": "FAILED",
+            "result_data": {},
+            "error": {"code": "INTERNAL_ERROR", "message": "처리 중 알 수 없는 오류", "traceback": None},
+        }
+        try:
+            dispatch_msg: dict[str, Any] = json.loads(raw)
+            task_id = dispatch_msg.get("task_id", "unknown")
+            action = dispatch_msg.get("action", "")
+            params = dispatch_msg.get("params", {})
+            logger.info("[FileAgent] 태스크 수신: task_id=%s action=%s", task_id, action)
+
+            op_result = await self._dispatch(action, params)
+
+            if op_result.status == "error":
+                agent_result = {
+                    "status": "FAILED",
+                    "result_data": {},
+                    "error": {"code": "EXECUTION_ERROR", "message": op_result.message, "traceback": None},
+                }
+            else:
+                agent_result = {
+                    "status": "COMPLETED",
+                    "result_data": {
+                        "summary": op_result.message,
+                        "raw_text": op_result.data or "",
+                    },
+                    "error": None,
+                }
+
+        except asyncio.CancelledError:
+            logger.warning("[FileAgent] 태스크 취소됨: task_id=%s", task_id)
+            agent_result["error"] = {"code": "CANCELLED", "message": "태스크가 취소되었습니다.", "traceback": None}
+            raise
+        except Exception as exc:
+            logger.error("[FileAgent] 태스크 처리 실패 task_id=%s: %s", task_id, exc)
+            agent_result["error"] = {"code": "INTERNAL_ERROR", "message": str(exc), "traceback": None}
+        finally:
+            try:
+                await self._report_result(
+                    orchestra_url=orchestra_url,
+                    task_id=task_id,
+                    status=agent_result.get("status", "FAILED"),
+                    result_data=agent_result.get("result_data", {}),
+                    error=agent_result.get("error"),
                 )
-            case "update_file":
-                return await self.update_file(
-                    payload["file_path"],
-                    payload["content"],
-                    payload.get("append", True),
-                )
-            case "delete_file":
-                return await self.delete_file(payload["file_path"])
-            case _:
-                return FileOperationResult(
-                    status="error", message=f"알 수 없는 액션: {action}"
-                )
+            except Exception as exc:
+                logger.error("[FileAgent] 결과 보고 실패 task_id=%s: %s", task_id, exc)
 
     async def run(self) -> None:
-        """
-        에이전트 사이클의 진입점.
-        Redis 채널 ``agent:file`` 을 구독하고, 메시지 1건을 처리한 뒤 자연 종료합니다.
-        (ephemeral-docker-ops 전략 준수: while True / asyncio.sleep 반복 금지)
-        """
-        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-        print(f"[{self.agent_name}] 실행 시작 (Redis: {redis_url})")
+        redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+        if "localhost" in redis_url: redis_url = redis_url.replace("localhost", "127.0.0.1")
+        orchestra_url = os.environ.get("ORCHESTRA_URL", "http://orchestra-agent:8001")
+        queue_key = f"agent:{self.agent_name}:tasks"
+        health_key = f"agent:{self.agent_name}:health"
 
-        async with RedisMessageBroker(redis_url) as broker:
-            async for message in broker.subscribe("file"):
-                print(
-                    f"[{self.agent_name}] 수신: action={message.action}, "
-                    f"sender={message.sender}"
-                )
+        logger.info("[FileAgent] 실행 시작 (Redis: %s, queue: %s)", redis_url, queue_key)
 
-                result = await self._dispatch(message)
+        redis = aioredis.from_url(redis_url, decode_responses=True)
 
-                response = AgentMessage(
-                    sender="file",
-                    receiver=message.sender,
-                    action=f"{message.action}_result",
-                    payload={
-                        "status": result.status,
-                        "message": result.message,
-                        "data": result.data,
-                    },
-                )
-                published = await broker.publish(response)
-                status_label = "발행 완료" if published else "발행 실패"
-                print(
-                    f"[{self.agent_name}] {status_label}: "
-                    f"result={result.status} → {message.sender}"
-                )
-                break  # ephemeral: 1건 처리 후 자연 종료
+        async def heartbeat_loop():
+            while True:
+                try:
+                    await redis.hset(health_key, mapping={
+                        "status": "IDLE",
+                        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                        "version": "1.0.0"
+                    })
+                    await redis.expire(health_key, 60)
+                    await asyncio.sleep(_HEARTBEAT_INTERVAL)
+                except asyncio.CancelledError: break
+                except Exception: await asyncio.sleep(5)
 
-        print(f"[{self.agent_name}] 실행 종료")
+        hb_task = asyncio.create_task(heartbeat_loop())
+
+        try:
+            while True:
+                result = await redis.blpop(queue_key, timeout=_BLPOP_TIMEOUT)
+                if result is None:
+                    continue
+                _, raw = result
+                asyncio.create_task(self._handle_task(raw, orchestra_url))
+        except asyncio.CancelledError:
+            logger.info("[FileAgent] 종료")
+        finally:
+            hb_task.cancel()
+            await redis.aclose()
+            logger.info("[FileAgent] 실행 종료")
