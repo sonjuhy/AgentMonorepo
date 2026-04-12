@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from .models import (
     ClarificationNLUResult,
+    DirectResponseNLUResult,
     MultiStepNLUResult,
     NLU_CONFIDENCE_THRESHOLD,
     NLUResult,
@@ -50,13 +51,14 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 
 # Constraints
 1. 출력은 반드시 유효한 JSON 형식이어야 하며, 다른 설명은 포함하지 않습니다.
-2. 사용자의 요청이 모호하거나 정보가 부족하면 communication_agent를 선택하고
+2. 사용자의 요청이 단순 인사, 감사, 날씨 질문, 자기소개 등 하위 에이전트의 전문 도구가 필요 없는 일상적인 대화라면 type을 "direct_response"로 설정하고 직접 답변하십시오.
+3. 사용자의 요청이 모호하거나 정보가 부족하면 communication_agent를 선택하고
    action을 "ask_clarification"으로 설정하십시오.
-3. 복합 작업(여러 에이전트가 필요)은 type을 "multi_step"으로 설정하고
+4. 복합 작업(여러 에이전트가 필요)은 type을 "multi_step"으로 설정하고
    plan 배열에 각 단계를 순서대로 나열하십시오.
-4. 에이전트 선택 이유(reason)와 신뢰도(confidence_score)는 반드시 포함하십시오.
-5. confidence_score가 {confidence_threshold} 미만이면 사용자에게 확인을 요청하십시오.
-6. requires_user_approval은 파일 삭제, 코드 실행, 캘린더 변경 등 되돌리기 어려운 작업에 true를 설정하십시오.
+5. 에이전트 선택 이유(reason)와 신뢰도(confidence_score)는 반드시 포함하십시오.
+6. confidence_score가 {confidence_threshold} 미만이면 사용자에게 확인을 요청하십시오.
+7. requires_user_approval은 파일 삭제, 코드 실행, 캘린더 변경 등 되돌리기 어려운 작업에 true를 설정하십시오.
 
 # Available Agents & Capabilities
 {agent_capabilities}
@@ -71,18 +73,26 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 
 ## 추가 질문 필요 (type: "clarification")
 {{"type": "clarification", "intent": "string", "selected_agent": "communication_agent", "action": "ask_clarification", "params": {{"question": "사용자에게 보낼 질문", "options": []}}, "metadata": {{"reason": "string", "confidence_score": 0.0, "requires_user_approval": false}}}}
+
+## 직접 답변 (type: "direct_response")
+{{"type": "direct_response", "intent": "chitchat", "params": {{"answer": "사용자에게 보낼 답변 내용"}}, "metadata": {{"reason": "단순 대화 요청임", "confidence_score": 1.0, "requires_user_approval": false}}}}
 """
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(style_guide: dict[str, str] | None = None) -> str:
     tz = ZoneInfo(_USER_TIMEZONE)
     now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+    
+    style_str = ""
+    if style_guide:
+        style_str = "\n# Persona & Response Style\n" + "\n".join(f"- {k}: {v}" for k, v in style_guide.items())
+
     return _SYSTEM_PROMPT_TEMPLATE.format(
         current_datetime=now,
         user_timezone=_USER_TIMEZONE,
         confidence_threshold=NLU_CONFIDENCE_THRESHOLD,
         agent_capabilities=_AGENT_CAPABILITIES,
-    )
+    ) + style_str
 
 
 def _build_user_prompt(user_text: str, context: list[dict[str, Any]]) -> str:
@@ -110,6 +120,8 @@ def _parse_nlu_result(raw: str) -> NLUResult:
         return MultiStepNLUResult(**data)
     if nlu_type == "clarification":
         return ClarificationNLUResult(**data)
+    if nlu_type == "direct_response":
+        return DirectResponseNLUResult(**data)
     return SingleNLUResult(**data)
 
 
@@ -137,20 +149,38 @@ class GeminiNLUEngine:
 
     def __init__(self, model: str | None = None) -> None:
         from google import genai
-        api_key = os.environ["GEMINI_API_KEY"]
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
         self._client = genai.Client(api_key=api_key)
         self._model = model or os.environ.get("GEMINI_NLU_MODEL", "gemini-2.0-flash")
+
+    async def validate(self) -> bool:
+        """API 키 유효성 및 연결 상태를 검증합니다."""
+        try:
+            # 아주 짧은 텍스트로 테스트 생성 요청
+            await self._client.aio.models.generate_content(
+                model=self._model,
+                contents="hi",
+                config={"max_output_tokens": 1}
+            )
+            logger.info("[NLU/Gemini] LLM 연결 검증 성공")
+            return True
+        except Exception as e:
+            logger.error("[NLU/Gemini] LLM 연결 검증 실패: %s", e)
+            return False
 
     async def analyze(
         self,
         user_text: str,
         session_id: str,
         context: list[dict[str, Any]],
+        style_guide: dict[str, str] | None = None,
     ) -> NLUResult:
         """Gemini API로 의도·에이전트·파라미터 추출 (최대 3회 재시도)."""
         from google.genai import types
 
-        system_prompt = _build_system_prompt()
+        system_prompt = _build_system_prompt(style_guide)
         user_prompt = _build_user_prompt(user_text, context)
         last_error = ""
 
@@ -207,17 +237,35 @@ class ClaudeNLUEngine:
 
     def __init__(self, model: str | None = None) -> None:
         import anthropic
-        self._client = anthropic.AsyncAnthropic()
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다.")
+        self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model or os.environ.get("CLAUDE_NLU_MODEL", "claude-haiku-4-5-20251001")
+
+    async def validate(self) -> bool:
+        """API 키 유효성 및 연결 상태를 검증합니다."""
+        try:
+            await self._client.messages.create(
+                model=self._model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+            logger.info("[NLU/Claude] LLM 연결 검증 성공")
+            return True
+        except Exception as e:
+            logger.error("[NLU/Claude] LLM 연결 검증 실패: %s", e)
+            return False
 
     async def analyze(
         self,
         user_text: str,
         session_id: str,
         context: list[dict[str, Any]],
+        style_guide: dict[str, str] | None = None,
     ) -> NLUResult:
         """Claude API로 의도 파악 (최대 3회 재시도)."""
-        system_prompt = _build_system_prompt()
+        system_prompt = _build_system_prompt(style_guide)
         user_prompt = _build_user_prompt(user_text, context)
         last_error = ""
 
@@ -231,6 +279,16 @@ class ClaudeNLUEngine:
                 )
                 raw = response.content[0].text if response.content else ""
                 result = _parse_nlu_result(raw)
+
+                # 토큰 사용량 로그
+                usage = response.usage
+                if usage:
+                    logger.info(
+                        "[NLU/Claude] 토큰 사용량: Input=%d, Output=%d, Total=%d",
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.input_tokens + usage.output_tokens,
+                    )
 
                 if hasattr(result, "metadata") and result.metadata.confidence_score < NLU_CONFIDENCE_THRESHOLD:
                     if result.type != "clarification":

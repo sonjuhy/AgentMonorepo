@@ -86,7 +86,9 @@ def _build_dispatch_message(
     }
 
 
-def resolve_placeholders(params: dict[str, Any], results: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def resolve_placeholders(
+    params: dict[str, Any], results: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
     """
     {{step_N.result.field}} 형식의 플레이스홀더를 실제 결과로 치환합니다.
 
@@ -139,7 +141,7 @@ class OrchestraManager:
         if redis_client is not None:
             self._redis = redis_client
         else:
-            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+            redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
             self._redis = aioredis.from_url(
                 redis_url,
                 decode_responses=True,
@@ -157,7 +159,9 @@ class OrchestraManager:
         agent:orchestra:tasks 큐를 BLPOP으로 감시하는 메인 루프입니다.
         각 태스크를 비동기 Task로 독립적으로 처리합니다.
         """
-        logger.info("[OrchestraManager] 메인 루프 시작 (queue=%s)", _ORCHESTRA_TASKS_KEY)
+        logger.info(
+            "[OrchestraManager] 메인 루프 시작 (queue=%s)", _ORCHESTRA_TASKS_KEY
+        )
         while True:
             try:
                 result = await self._redis.blpop(_ORCHESTRA_TASKS_KEY, timeout=5)
@@ -183,8 +187,11 @@ class OrchestraManager:
         try:
             await self.process_task(task)
         except Exception as exc:
-            logger.exception("[OrchestraManager] 태스크 처리 중 예외: task_id=%s: %s",
-                             task.get("task_id"), exc)
+            logger.exception(
+                "[OrchestraManager] 태스크 처리 중 예외: task_id=%s: %s",
+                task.get("task_id"),
+                exc,
+            )
             await self._send_error_to_user(task, str(exc))
 
     # ── 태스크 처리 파이프라인 ────────────────────────────────────────────────
@@ -201,29 +208,63 @@ class OrchestraManager:
         user_text = task.get("content", "")
         requester = task.get("requester", {})
 
-        logger.info("[Manager] 태스크 처리 시작 task_id=%s session=%s", task_id, session_id)
+        logger.info(
+            "[Manager] 태스크 처리 시작 task_id=%s session=%s", task_id, session_id
+        )
 
         # 세션 초기화 및 상태 기록
+        user_id = requester.get("user_id", "unknown")
         await self._state.init_session(
             session_id,
-            requester.get("user_id", ""),
+            user_id,
             requester.get("channel_id", ""),
         )
-        await self._state.add_message(session_id, "user", user_text, provider="slack")
-        await self._state.update_task_state(task_id, {
-            "status": "PROCESSING",
-            "session_id": session_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        await self._state.add_message(session_id, user_id, "user", user_text, provider="slack")
+        await self._state.update_task_state(
+            task_id,
+            {
+                "status": "PROCESSING",
+                "session_id": session_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
         # NLU 의도 파악
-        context = await self._state.build_context_for_llm(session_id, provider="gemini")
-        nlu_result: NLUResult = await self._nlu.analyze(user_text, session_id, context)
+        context = await self._state.build_context_for_llm(session_id, user_id, provider="gemini")
+        summary_data = await self._state.get_session_context_summary(session_id)
+        
+        nlu_result: NLUResult = await self._nlu.analyze(
+            user_text, 
+            session_id, 
+            context,
+            style_guide=summary_data.get("style")
+        )
 
-        logger.info("[Manager] NLU 결과 type=%s session=%s", nlu_result.type, session_id)
+        # ── 에이전트 선택 로그 출력 ───────────────────────────────────────────
+        reason = nlu_result.metadata.reason if hasattr(nlu_result, "metadata") else "사유 없음"
+        confidence = nlu_result.metadata.confidence_score if hasattr(nlu_result, "metadata") else 0.0
+        
+        if nlu_result.type == "direct_response":
+            logger.info("[Manager] 판단: [직접 답변 (orchestra)] - 사유: %s (신뢰도: %.2f)", reason, confidence)
+        elif nlu_result.type == "clarification":
+            logger.info("[Manager] 판단: [추가 질문 (communication_agent)] - 사유: %s (신뢰도: %.2f)", reason, confidence)
+        elif nlu_result.type == "multi_step":
+            agents = [step.selected_agent for step in nlu_result.plan]
+            logger.info("[Manager] 판단: [복합 작업 (%s)] - 사유: %s (신뢰도: %.2f)", " -> ".join(agents), reason, confidence)
+        else: # single
+            logger.info("[Manager] 판단: [단일 작업 (%s)] - 사유: %s (신뢰도: %.2f)", nlu_result.selected_agent, reason, confidence)
+        # ──────────────────────────────────────────────────────────────────
 
         # 타입별 처리 분기
-        if nlu_result.type == "clarification":
+        if nlu_result.type == "direct_response":
+            await self._send_to_comm_agent(
+                task=task,
+                content=nlu_result.params["answer"],
+                requires_approval=False,
+                agent_name="orchestra",
+            )
+
+        elif nlu_result.type == "clarification":
             await self._route_clarification(nlu_result, task)
 
         elif nlu_result.type == "multi_step":
@@ -250,27 +291,28 @@ class OrchestraManager:
             agent_name="communication_agent",
         )
 
-    async def _route_single(self, nlu_result: SingleNLUResult, task: OrchestraTask) -> None:
+    async def _route_single(
+        self, nlu_result: SingleNLUResult, task: OrchestraTask
+    ) -> None:
         """단일 에이전트 작업을 라우팅합니다."""
         agent_name = nlu_result.selected_agent
         dispatch_task_id = str(uuid.uuid4())
 
         # ── 로컬 직접 실행 에이전트 (Redis 큐 미사용) ────────────────────────
         if agent_name == "agent_builder":
-            result = await self._run_agent_builder(
-                nlu_result.params, dispatch_task_id
-            )
+            result = await self._run_agent_builder(nlu_result.params, dispatch_task_id)
             await self._handle_agent_result(
                 result, task, nlu_result.metadata.requires_user_approval
             )
             return
 
-        # ── 일반 에이전트: Circuit Breaker → Dispatch → Wait ─────────────────
-        timeout = AGENT_TIMEOUT_MAP.get(agent_name, 300)
-
-        if await self._health.check_circuit_breaker(agent_name):
-            await self._send_fallback_message(task, agent_name)
+        # ── 일반 에이전트: 활성 상태 체크 → Dispatch → Wait ─────────────────
+        ready, reason = await self._health.is_agent_ready(agent_name)
+        if not ready:
+            await self._send_agent_unavailable_error(task, agent_name, reason)
             return
+
+        timeout = AGENT_TIMEOUT_MAP.get(agent_name, 300)
 
         dispatch = _build_dispatch_message(
             task_id=dispatch_task_id,
@@ -284,15 +326,20 @@ class OrchestraManager:
         )
 
         await self._dispatch_to_agent(agent_name, dispatch)
-        await self._state.update_task_state(dispatch_task_id, {
-            "status": "PENDING",
-            "session_id": task["session_id"],
-            "agent": agent_name,
-        })
+        await self._state.update_task_state(
+            dispatch_task_id,
+            {
+                "status": "PENDING",
+                "session_id": task["session_id"],
+                "agent": agent_name,
+            },
+        )
 
         # 결과 수신 대기
         result = await self.wait_for_result(dispatch_task_id, timeout=timeout)
-        await self._handle_agent_result(result, task, nlu_result.metadata.requires_user_approval)
+        await self._handle_agent_result(
+            result, task, nlu_result.metadata.requires_user_approval
+        )
 
     async def _run_agent_builder(
         self, params: dict[str, Any], task_id: str
@@ -302,13 +349,16 @@ class OrchestraManager:
         tools/agent_builder/가 모노리포 루트에 존재해야 합니다.
         """
         from .agent_builder_handler import AgentBuilderHandler
+
         handler = AgentBuilderHandler()
         logger.info("[Manager] AgentBuilder 로컬 실행 task_id=%s", task_id)
         return await handler.build_agent(params, task_id)
 
     # ── 복합 작업 플래너 ──────────────────────────────────────────────────────
 
-    async def run_plan(self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask) -> None:
+    async def run_plan(
+        self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask
+    ) -> None:
         """
         plan 배열의 각 step을 depends_on을 고려하여 순차 실행합니다.
 
@@ -320,7 +370,11 @@ class OrchestraManager:
         results: dict[int, dict[str, Any]] = {}
         total_steps = len(plan)
 
-        logger.info("[Manager] 복합 작업 시작: %d단계 session=%s", total_steps, original_task["session_id"])
+        logger.info(
+            "[Manager] 복합 작업 시작: %d단계 session=%s",
+            total_steps,
+            original_task["session_id"],
+        )
 
         for step in sorted(plan, key=lambda s: s.step):
             # 선행 단계 완료 대기
@@ -330,16 +384,21 @@ class OrchestraManager:
                     await asyncio.sleep(0.5)
                     waited += 0.5
                 if dep_step not in results:
-                    logger.error("[Manager] 의존 단계 %d 타임아웃 — 복합 작업 중단", dep_step)
-                    await self._send_error_to_user(original_task, f"단계 {dep_step} 결과를 받지 못했습니다.")
+                    logger.error(
+                        "[Manager] 의존 단계 %d 타임아웃 — 복합 작업 중단", dep_step
+                    )
+                    await self._send_error_to_user(
+                        original_task, f"단계 {dep_step} 결과를 받지 못했습니다.", agent_name="orchestra"
+                    )
                     return
 
             # 플레이스홀더 치환
             params = resolve_placeholders(step.params, results)
 
-            # Circuit Breaker 확인
-            if await self._health.check_circuit_breaker(step.selected_agent):
-                await self._send_fallback_message(original_task, step.selected_agent)
+            # 에이전트 활성 상태 체크
+            ready, reason = await self._health.is_agent_ready(step.selected_agent)
+            if not ready:
+                await self._send_agent_unavailable_error(original_task, step.selected_agent, reason)
                 return
 
             # 단계 실행
@@ -375,7 +434,8 @@ class OrchestraManager:
                 await self._health.record_failure(step.selected_agent)
                 await self._send_error_to_user(
                     original_task,
-                    f"단계 {step.step} ({step.selected_agent}) 실패: {error_msg}",
+                    f"단계 {step.step} 실패: {error_msg}",
+                    agent_name=step.selected_agent
                 )
                 return
 
@@ -425,16 +485,27 @@ class OrchestraManager:
             if result:
                 _, raw = result
                 data: dict[str, Any] = json.loads(raw)
-                logger.info("[Manager] 결과 수신 task_id=%s status=%s", task_id, data.get("status"))
+                logger.info(
+                    "[Manager] 결과 수신 task_id=%s status=%s",
+                    task_id,
+                    data.get("status"),
+                )
                 return data
             remaining -= wait_sec
 
-        logger.warning("[Manager] 결과 타임아웃 task_id=%s timeout=%ds", task_id, timeout)
+        logger.warning(
+            "[Manager] 결과 타임아웃 task_id=%s timeout=%ds", task_id, timeout
+        )
         return {
             "task_id": task_id,
             "status": "FAILED",
+            "agent": "unknown",
             "result_data": {},
-            "error": {"code": "TIMEOUT", "message": f"{timeout}초 내 응답 없음", "traceback": None},
+            "error": {
+                "code": "TIMEOUT",
+                "message": f"{timeout}초 내 응답 없음",
+                "traceback": None,
+            },
             "usage_stats": {},
         }
 
@@ -452,7 +523,9 @@ class OrchestraManager:
         key = f"{_RESULTS_KEY_PREFIX}{task_id}"
         await self._redis.rpush(key, json.dumps(result, ensure_ascii=False))
         await self._state.update_task_state(task_id, {"status": result["status"]})
-        logger.info("[Manager] 결과 저장 task_id=%s status=%s", task_id, result["status"])
+        logger.info(
+            "[Manager] 결과 저장 task_id=%s status=%s", task_id, result["status"]
+        )
 
     # ── 에이전트 결과 처리 ────────────────────────────────────────────────────
 
@@ -469,7 +542,7 @@ class OrchestraManager:
         if status == "FAILED":
             error_msg = result.get("error", {}).get("message", "알 수 없는 오류")
             await self._health.record_failure(agent_name)
-            await self._send_error_to_user(task, error_msg)
+            await self._send_error_to_user(task, error_msg, agent_name=agent_name)
             return
 
         await self._health.record_success(agent_name)
@@ -536,7 +609,9 @@ class OrchestraManager:
         resp_raw = await self._redis.blpop(approval_key, timeout=_APPROVAL_TIMEOUT_SEC)
 
         if not resp_raw:
-            logger.warning("[Manager] 승인 타임아웃 approval_task_id=%s", approval_task_id)
+            logger.warning(
+                "[Manager] 승인 타임아웃 approval_task_id=%s", approval_task_id
+            )
             return False
 
         _, raw = resp_raw
@@ -556,11 +631,15 @@ class OrchestraManager:
 
     # ── 내부 유틸리티 ─────────────────────────────────────────────────────────
 
-    async def _dispatch_to_agent(self, agent_name: str, dispatch: DispatchMessage) -> None:
+    async def _dispatch_to_agent(
+        self, agent_name: str, dispatch: DispatchMessage
+    ) -> None:
         """에이전트 큐에 작업 지시서를 전달합니다."""
         queue_key = f"agent:{agent_name}:tasks"
         await self._redis.rpush(queue_key, json.dumps(dispatch, ensure_ascii=False))
-        logger.info("[Manager] 디스패치 → %s task_id=%s", agent_name, dispatch["task_id"])
+        logger.info(
+            "[Manager] 디스패치 → %s task_id=%s", agent_name, dispatch["task_id"]
+        )
 
     async def _send_to_comm_agent(
         self,
@@ -570,16 +649,19 @@ class OrchestraManager:
         agent_name: str,
     ) -> None:
         """소통 에이전트로 최종 메시지를 전달합니다."""
-        comm_task_id = str(uuid.uuid4())
+        # 원래의 task_id를 유지하여 소통 에이전트가 채널/스레드 컨텍스트를 찾을 수 있게 함
+        task_id = task.get("task_id", str(uuid.uuid4()))
         msg: CommAgentMessage = {
-            "task_id": comm_task_id,
+            "task_id": task_id,
             "content": content,
             "requires_user_approval": requires_approval,
             "agent_name": agent_name,
             "progress_percent": None,
         }
-        await self._redis.rpush("agent:communication:tasks", json.dumps(msg, ensure_ascii=False))
-        logger.debug("[Manager] 소통 에이전트 전달 task_id=%s", comm_task_id)
+        await self._redis.rpush(
+            "agent:communication:tasks", json.dumps(msg, ensure_ascii=False)
+        )
+        logger.debug("[Manager] 소통 에이전트 전달 task_id=%s", task_id)
 
     async def _send_progress_to_comm(
         self,
@@ -588,30 +670,65 @@ class OrchestraManager:
         message: str,
     ) -> None:
         """진행 상황을 소통 에이전트로 전달합니다."""
-        comm_task_id = str(uuid.uuid4())
+        # 원래의 task_id를 유지함
+        task_id = task.get("task_id", str(uuid.uuid4()))
         msg: CommAgentMessage = {
-            "task_id": comm_task_id,
+            "task_id": task_id,
             "content": message,
             "requires_user_approval": False,
             "agent_name": "orchestra",
             "progress_percent": percent,
         }
-        await self._redis.rpush("agent:communication:tasks", json.dumps(msg, ensure_ascii=False))
-
-    async def _send_error_to_user(self, task: OrchestraTask, error_message: str) -> None:
-        """에러 메시지를 사용자에게 전달합니다."""
-        await self._send_to_comm_agent(
-            task=task,
-            content=f"❌ 오류가 발생했습니다.\n\n{error_message}",
-            requires_approval=False,
-            agent_name="orchestra",
+        await self._redis.rpush(
+            "agent:communication:tasks", json.dumps(msg, ensure_ascii=False)
         )
 
-    async def _send_fallback_message(self, task: OrchestraTask, agent_name: str) -> None:
+    async def _send_error_to_user(
+        self, task: OrchestraTask, error_message: str, agent_name: str = "orchestra"
+    ) -> None:
+        """
+        에러 메시지를 [작업내용][에이전트] - [에러내역] 형식으로 전달합니다.
+        """
+        work_name = task.get("content", "알 수 없는 작업")
+        if len(work_name) > 30:
+            work_name = work_name[:27] + "..."
+            
+        formatted_content = f"[{work_name}][{agent_name}] - {error_message}"
+        
+        await self._send_to_comm_agent(
+            task=task,
+            content=formatted_content,
+            requires_approval=False,
+            agent_name=agent_name,
+        )
+
+    async def _send_fallback_message(
+        self, task: OrchestraTask, agent_name: str
+    ) -> None:
         """Circuit Breaker로 차단된 에이전트에 대한 안내 메시지를 전달합니다."""
         await self._send_to_comm_agent(
             task=task,
             content=f"⚠️ *{agent_name}* 에이전트가 일시적으로 사용 불가 상태입니다. 잠시 후 다시 시도해 주세요.",
             requires_approval=False,
             agent_name="orchestra",
+        )
+
+    async def _send_agent_unavailable_error(
+        self, task: OrchestraTask, agent_name: str, reason: str
+    ) -> None:
+        """
+        에이전트가 사용 불가능한 원인을 상세히 사용자에게 전달합니다.
+        """
+        messages = {
+            "NOT_FOUND": f"에이전트 `{agent_name}`가 시스템에 등록되지 않았습니다.",
+            "INACTIVE": f"에이전트 `{agent_name}`가 현재 오프라인 상태입니다.",
+            "CIRCUIT_OPEN": f"에이전트 `{agent_name}`에 오류가 빈번하여 보호를 위해 일시 차단되었습니다.",
+            "MAINTENANCE": f"에이전트 `{agent_name}`가 점검 중입니다.",
+        }
+        error_msg = messages.get(reason, f"에이전트 `{agent_name}`를 사용할 수 없습니다. (사유: {reason})")
+        
+        await self._send_error_to_user(
+            task=task,
+            error_message=f"작업을 중단합니다: {error_msg}",
+            agent_name="orchestra"
         )

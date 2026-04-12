@@ -70,8 +70,16 @@ class ClarificationNLUResult(BaseModel):
     metadata: NLUMetadata
 
 
+class DirectResponseNLUResult(BaseModel):
+    """단순 인사, 일상 대화 등 하위 에이전트 호출 없이 직접 답변하는 결과"""
+    type: Literal["direct_response"]
+    intent: str
+    params: dict[str, str]  # {"answer": "답변 내용"}
+    metadata: NLUMetadata
+
+
 # NLU 결과 타입 유니온
-NLUResult = SingleNLUResult | MultiStepNLUResult | ClarificationNLUResult
+NLUResult = SingleNLUResult | MultiStepNLUResult | ClarificationNLUResult | DirectResponseNLUResult
 
 # 신뢰도 임계값
 NLU_CONFIDENCE_THRESHOLD = 0.7
@@ -128,6 +136,7 @@ class AgentResultError(TypedDict):
 class AgentResult(TypedDict):
     """하위 에이전트 → 오케스트라 결과 (orchestra:results:{task_id} 큐)"""
     task_id: str
+    agent: str             # 결과를 보낸 에이전트 이름
     status: str            # COMPLETED | FAILED | WAITING_USER | PROCESSING
     result_data: dict[str, Any]
     error: AgentResultError | None
@@ -138,6 +147,7 @@ class AgentHealth(TypedDict):
     """에이전트 헬스 정보 (agent:{name}:health Redis Hash)"""
     agent_id: str
     status: str            # IDLE | BUSY | MAINTENANCE | ERROR
+    lifecycle_type: str    # long_running | ephemeral
     last_heartbeat: str    # ISO 8601
     version: str
     capabilities: list[str]
@@ -157,11 +167,10 @@ class CommAgentMessage(TypedDict):
 # 에이전트 레지스트리: 에이전트 이름 → 기본 timeout(초)
 AGENT_TIMEOUT_MAP: dict[str, int] = {
     "coding_agent": 600,
-    "planning_agent": 300,
+    "archive_agent": 300,
     "research_agent": 300,
     "calendar_agent": 60,
     "file_agent": 120,
-    "archive_agent": 120,
     "communication_agent": 30,
     "sandbox_agent": 60,
     "agent_builder": 120,   # 로컬 빌드 (패키지 검증 포함), Redis 큐 미사용
