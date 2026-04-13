@@ -28,7 +28,7 @@ from typing import Any, AsyncGenerator
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(encoding="utf-8", override=True)
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -55,6 +55,7 @@ _MAX_RECENT_MESSAGES = 100
 
 # ─── 싱글톤 컨텍스트 ────────────────────────────────────────────────────────────
 
+
 class _AppContext:
     """FastAPI 앱 생애 동안 단일 인스턴스로 유지되는 공유 상태."""
 
@@ -76,6 +77,7 @@ _ctx = _AppContext()
 
 
 # ─── 수신 메시지 내부 저장 ──────────────────────────────────────────────────────
+
 
 def _store_received_message(event: dict[str, Any]) -> dict[str, Any]:
     """수신된 Slack 이벤트를 인메모리에 저장하고 SSE 구독자에 브로드캐스트합니다."""
@@ -100,6 +102,7 @@ def _store_received_message(event: dict[str, Any]) -> dict[str, Any]:
 
 # ─── Slack 이벤트 파싱 ──────────────────────────────────────────────────────────
 
+
 def _parse_slack_event(event: dict[str, Any]) -> SlackEvent | None:
     """slack_bolt 이벤트 핸들러의 event 객체를 SlackEvent TypedDict로 변환합니다."""
     if event.get("subtype") or event.get("bot_id"):
@@ -120,23 +123,29 @@ def _parse_slack_event(event: dict[str, Any]) -> SlackEvent | None:
 
 # ─── LLM 분류기 팩토리 ──────────────────────────────────────────────────────────
 
+
 def _build_classifier(backend: str) -> ClassifierProtocol:
     """환경변수 CLASSIFIER_BACKEND 값에 따라 적합한 LLM 분류기를 반환합니다."""
     b = backend.lower()
     if b == "gemini_api":
         from .llm_classifier import GeminiAPIClassifier
+
         return GeminiAPIClassifier()
     if b == "claude_cli":
         from .llm_classifier import ClaudeCLIClassifier
+
         return ClaudeCLIClassifier()
     if b == "gemini_cli":
         from .llm_classifier import GeminiCLIClassifier
+
         return GeminiCLIClassifier()
     from .llm_classifier import ClaudeAPIClassifier
+
     return ClaudeAPIClassifier()
 
 
 # ─── FastAPI lifespan ────────────────────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -268,6 +277,7 @@ async def lifespan(app: FastAPI):
 
     # ── Redis 결과 리스너 백그라운드 태스크 실행 ──
     if redis_enabled and _ctx.comm_agent is not None:
+
         async def _run_listen() -> None:
             try:
                 await _ctx.comm_agent.listen_system_results()  # type: ignore[union-attr]
@@ -306,6 +316,7 @@ async def lifespan(app: FastAPI):
 
 # ─── 승인 액션 공통 처리 ─────────────────────────────────────────────────────────
 
+
 async def _handle_approval_action(
     body: dict[str, Any],
     action: str,
@@ -337,7 +348,9 @@ async def _handle_approval_action(
     }
 
     await _ctx.redis.push_approval(feedback)
-    logger.info("[action] 피드백 전달 — task_id=%s action=%s user=%s", task_id, action, user_id)
+    logger.info(
+        "[action] 피드백 전달 — task_id=%s action=%s user=%s", task_id, action, user_id
+    )
 
     # 메시지 상태 업데이트
     action_labels = {
@@ -372,6 +385,7 @@ app = FastAPI(
 # 메시지 수신 엔드포인트
 # ──────────────────────────────────────────────────────────────────────────────────
 
+
 @app.get("/messages/history", summary="Slack 채널 메시지 히스토리 조회")
 async def get_channel_history(
     channel: str = Query(..., description="Slack 채널 ID (예: C06XXXXXXX)"),
@@ -381,7 +395,9 @@ async def get_channel_history(
 ) -> JSONResponse:
     """Slack conversations.history API를 통해 채널의 메시지 목록을 조회합니다."""
     if _ctx.web_client is None:
-        raise HTTPException(status_code=503, detail="WebClient가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, detail="WebClient가 초기화되지 않았습니다."
+        )
 
     try:
         kwargs: dict[str, Any] = {"channel": channel, "limit": limit}
@@ -404,12 +420,14 @@ async def get_channel_history(
             for msg in messages
         ]
 
-        return JSONResponse({
-            "ok": True,
-            "channel": channel,
-            "messages": parsed,
-            "has_more": response.get("has_more", False),
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "channel": channel,
+                "messages": parsed,
+                "has_more": response.get("has_more", False),
+            }
+        )
 
     except Exception as exc:
         err_str = str(exc)
@@ -419,7 +437,12 @@ async def get_channel_history(
                 detail={
                     "error": "missing_scope",
                     "message": "Slack 앱에 channels:history 스코프가 없습니다.",
-                    "needed_scopes": ["channels:history", "groups:history", "mpim:history", "im:history"],
+                    "needed_scopes": [
+                        "channels:history",
+                        "groups:history",
+                        "mpim:history",
+                        "im:history",
+                    ],
                 },
             ) from exc
         logger.exception("[/messages/history] 조회 실패: %s", exc)
@@ -428,7 +451,9 @@ async def get_channel_history(
 
 @app.get("/messages/recent", summary="서버 수신 메시지 인메모리 조회")
 async def get_recent_messages(
-    limit: int = Query(20, ge=1, le=_MAX_RECENT_MESSAGES, description="반환할 최근 메시지 수"),
+    limit: int = Query(
+        20, ge=1, le=_MAX_RECENT_MESSAGES, description="반환할 최근 메시지 수"
+    ),
     channel: str | None = Query(None, description="특정 채널 ID로 필터링"),
 ) -> JSONResponse:
     """Socket Mode를 통해 수신하여 인메모리에 저장한 최근 메시지를 반환합니다."""
@@ -440,11 +465,13 @@ async def get_recent_messages(
     sorted_messages = sorted(all_messages, key=lambda m: m.get("ts", ""), reverse=True)
     result = sorted_messages[:limit]
 
-    return JSONResponse({
-        "ok": True,
-        "messages": result,
-        "total_stored": len(all_messages),
-    })
+    return JSONResponse(
+        {
+            "ok": True,
+            "messages": result,
+            "total_stored": len(all_messages),
+        }
+    )
 
 
 @app.get("/messages/live", summary="실시간 메시지 스트리밍 (Server-Sent Events)")
@@ -457,12 +484,15 @@ async def stream_live_messages(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            connect_data = json.dumps({
-                "event": "connected",
-                "message": "Slack 실시간 메시지 스트림 연결됨",
-                "filter_channel": channel,
-                "timestamp": time.time(),
-            }, ensure_ascii=False)
+            connect_data = json.dumps(
+                {
+                    "event": "connected",
+                    "message": "Slack 실시간 메시지 스트림 연결됨",
+                    "filter_channel": channel,
+                    "timestamp": time.time(),
+                },
+                ensure_ascii=False,
+            )
             yield f"data: {connect_data}\n\n"
 
             while True:
@@ -470,7 +500,7 @@ async def stream_live_messages(
                     record = await asyncio.wait_for(client_queue.get(), timeout=30.0)
 
                     if record.get("event") == "close":
-                        yield "data: {\"event\": \"server_closing\"}\n\n"
+                        yield 'data: {"event": "server_closing"}\n\n'
                         break
 
                     if channel and record.get("channel") != channel:
@@ -503,6 +533,7 @@ async def stream_live_messages(
 # 메시지 전송 엔드포인트
 # ──────────────────────────────────────────────────────────────────────────────────
 
+
 @app.post("/send", summary="Slack 채널에 메시지 전송")
 async def send_message(request: Request) -> JSONResponse:
     """
@@ -514,7 +545,9 @@ async def send_message(request: Request) -> JSONResponse:
         thread_ts (str | None): 스레드 답글로 보낼 경우 원본 메시지의 ts
     """
     if _ctx.web_client is None:
-        raise HTTPException(status_code=503, detail="WebClient가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, detail="WebClient가 초기화되지 않았습니다."
+        )
 
     body: dict[str, Any] = await request.json()
     channel: str = body.get("channel", "")
@@ -542,7 +575,9 @@ async def notify_pending_tasks() -> JSONResponse:
     from .notion_parser import parse_notion_task
 
     if _ctx.comm_agent is None:
-        raise HTTPException(status_code=503, detail="CommAgent가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, detail="CommAgent가 초기화되지 않았습니다."
+        )
 
     sent = 0
     failed = 0
@@ -568,16 +603,15 @@ async def notify_pending_tasks() -> JSONResponse:
 # 유틸리티 엔드포인트
 # ──────────────────────────────────────────────────────────────────────────────────
 
+
 @app.get("/health", summary="헬스체크")
 async def health_check() -> JSONResponse:
     """서비스 상태, Slack Socket Mode 연결 여부, Redis 연결 여부를 반환합니다."""
     socket_running: bool = (
-        _ctx._socket_task is not None
-        and not _ctx._socket_task.done()
+        _ctx._socket_task is not None and not _ctx._socket_task.done()
     )
     listen_running: bool = (
-        _ctx._listen_task is not None
-        and not _ctx._listen_task.done()
+        _ctx._listen_task is not None and not _ctx._listen_task.done()
     )
     redis_connected: bool = False
     if _ctx.redis is not None:
@@ -586,11 +620,13 @@ async def health_check() -> JSONResponse:
         except Exception:
             pass
 
-    return JSONResponse({
-        "status": "ok",
-        "socket_running": socket_running,
-        "redis_listener_running": listen_running,
-        "redis_connected": redis_connected,
-        "sse_clients": len(_ctx.sse_queues),
-        "recent_messages_buffered": len(_ctx.recent_messages),
-    })
+    return JSONResponse(
+        {
+            "status": "ok",
+            "socket_running": socket_running,
+            "redis_listener_running": listen_running,
+            "redis_connected": redis_connected,
+            "sse_clients": len(_ctx.sse_queues),
+            "recent_messages_buffered": len(_ctx.recent_messages),
+        }
+    )

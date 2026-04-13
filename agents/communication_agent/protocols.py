@@ -7,7 +7,7 @@ Communication Agent 추상 인터페이스 (Protocol)
 
 from typing import Any, Protocol
 
-from .models import ExecutionResult, ParsedTask, RawPayload, SlackMessage, SlackEvent
+from .models import DiscordEvent, ExecutionResult, ParsedTask, RawPayload, SlackMessage, SlackEvent, TelegramEvent
 
 
 class SlackAgentProtocol(Protocol):
@@ -116,4 +116,50 @@ class SlackCommAgentProtocol(Protocol):
         Returns:
             list[dict[str, Any]]: Slack Block Kit 블록 리스트.
         """
+        ...
+
+
+class DiscordCommAgentProtocol(Protocol):
+    """
+    Discord 소통 에이전트의 양방향 게이트웨이 인터페이스입니다.
+    - Inbound:  Discord 메시지 → on_user_message → Redis agent:orchestra:tasks
+    - Outbound: Redis agent:communication:discord:tasks → listen_system_results → Discord
+    - Feedback: 사용자 버튼 클릭 → Redis orchestra:approval:{task_id}
+    """
+
+    agent_name: str
+
+    async def on_user_message(self, event: DiscordEvent) -> None:
+        """Discord 메시지를 수신하여 오케스트라 Redis 큐로 전달합니다."""
+        ...
+
+    async def listen_system_results(self) -> None:
+        """Redis agent:communication:discord:tasks 큐를 모니터링하여 결과를 Discord로 전달합니다."""
+        ...
+
+    async def send_message(self, channel_id: str, content: str, reference_message_id: str | None = None) -> str:
+        """Discord 채널에 메시지를 전송하고 message_id를 반환합니다."""
+        ...
+
+
+class TelegramCommAgentProtocol(Protocol):
+    """
+    Telegram 소통 에이전트의 양방향 게이트웨이 인터페이스입니다.
+    - Inbound:  Telegram 메시지 → on_user_message → Redis agent:orchestra:tasks
+    - Outbound: Redis agent:communication:telegram:tasks → listen_system_results → Telegram
+    - Feedback: 사용자 인라인 버튼 클릭 → Redis orchestra:approval:{task_id}
+    """
+
+    agent_name: str
+
+    async def on_user_message(self, event: TelegramEvent) -> None:
+        """Telegram 메시지를 수신하여 오케스트라 Redis 큐로 전달합니다."""
+        ...
+
+    async def listen_system_results(self) -> None:
+        """Redis agent:communication:telegram:tasks 큐를 모니터링하여 결과를 Telegram으로 전달합니다."""
+        ...
+
+    async def send_message(self, chat_id: str, text: str, reply_to_message_id: str | None = None) -> str:
+        """Telegram 채팅에 메시지를 전송하고 message_id를 반환합니다."""
         ...

@@ -30,6 +30,7 @@ from ..models import (
 from .message_cleaner import MessageCleaner
 from .notion_parser import parse_notion_task
 from .redis_broker import RedisBroker
+from .formatter import SlackFormatter
 
 logger = logging.getLogger("slack_agent.agent")
 
@@ -374,14 +375,9 @@ class SlackCommAgent:
     ) -> list[dict[str, Any]]:
         """
         일반 결과 응답용 Slack Block Kit 블록 리스트를 생성합니다.
-
-        Args:
-            content (str): 결과 본문 텍스트 (마크다운 지원).
-            agent_name (str): 처리한 에이전트 이름.
-
-        Returns:
-            list[dict]: Slack Block Kit 블록 리스트.
         """
+        formatted_content = SlackFormatter.format(content)
+
         return [
             {
                 "type": "header",
@@ -390,7 +386,7 @@ class SlackCommAgent:
             {"type": "divider"},
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": content},
+                "text": {"type": "mrkdwn", "text": formatted_content},
             },
             {
                 "type": "context",

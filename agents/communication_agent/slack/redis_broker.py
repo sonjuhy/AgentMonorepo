@@ -18,7 +18,17 @@ logger = logging.getLogger("slack_agent.redis_broker")
 
 # Redis 큐 키 상수
 ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
-COMM_TASKS_KEY = "agent:communication:tasks"
+COMM_TASKS_KEY = "agent:communication:tasks"                       # Slack 기본
+DISCORD_COMM_TASKS_KEY = "agent:communication:discord:tasks"       # Discord 전용
+TELEGRAM_COMM_TASKS_KEY = "agent:communication:telegram:tasks"     # Telegram 전용
+
+# 플랫폼 → 통신 큐 매핑
+PLATFORM_COMM_QUEUE: dict[str, str] = {
+    "slack": COMM_TASKS_KEY,
+    "discord": DISCORD_COMM_TASKS_KEY,
+    "telegram": TELEGRAM_COMM_TASKS_KEY,
+}
+
 # 승인 피드백은 태스크별 큐를 사용 (오케스트라와 일치)
 # 키 형식: orchestra:approval:{approval_task_id}
 _APPROVAL_KEY_PREFIX = "orchestra:approval:"
@@ -55,32 +65,33 @@ class RedisBroker:
         channel_id: str,
         content: str,
         thread_ts: str | None = None,
+        source: str = "slack",
     ) -> str:
         """
         사용자 요청을 agent:orchestra:tasks 큐에 삽입합니다.
 
         Args:
-            user_id (str): Slack 사용자 ID.
-            channel_id (str): Slack 채널 ID.
+            user_id (str): 플랫폼 사용자 ID.
+            channel_id (str): 플랫폼 채널/채팅 ID.
             content (str): 정제된 메시지 텍스트.
-            thread_ts (str | None): 현재 스레드 루트 ts.
+            thread_ts (str | None): 스레드 루트 ts (Slack) 또는 메시지 ID (Discord/Telegram).
+            source (str): 메시지 출처 플랫폼 ("slack" | "discord" | "telegram").
 
         Returns:
             str: 생성된 task_id (UUID).
         """
         task_id = str(uuid.uuid4())
-        # session_id: 오케스트라 NLU 컨텍스트 주입용 (user_id:channel_id 형식)
         session_id = f"{user_id}:{channel_id}"
         task: dict[str, Any] = {
             "task_id": task_id,
             "session_id": session_id,
             "requester": {"user_id": user_id, "channel_id": channel_id},
             "content": content,
-            "source": "slack",
+            "source": source,
             "thread_ts": thread_ts,
         }
         await self._client.rpush(ORCHESTRA_TASKS_KEY, json.dumps(task, ensure_ascii=False))
-        logger.debug("[RedisBroker] push_to_orchestra task_id=%s session_id=%s", task_id, session_id)
+        logger.debug("[RedisBroker] push_to_orchestra task_id=%s session_id=%s source=%s", task_id, session_id, source)
         return task_id
 
     async def push_approval(self, feedback: dict[str, Any]) -> None:
@@ -103,17 +114,19 @@ class RedisBroker:
         await self._client.rpush(key, json.dumps(feedback, ensure_ascii=False))
         logger.debug("[RedisBroker] push_approval key=%s action=%s", key, feedback.get("action"))
 
-    async def blpop_comm_task(self, timeout: float = 5.0) -> dict[str, Any] | None:
+    async def blpop_comm_task(self, timeout: float = 5.0, queue_key: str | None = None) -> dict[str, Any] | None:
         """
-        agent:communication:tasks 큐에서 결과 메시지를 블로킹으로 수신합니다.
+        통신 결과 큐에서 메시지를 블로킹으로 수신합니다.
 
         Args:
             timeout (float): 블로킹 대기 시간(초). 0이면 무제한 대기.
+            queue_key (str | None): 수신할 큐 키. None이면 기본 Slack 큐 사용.
 
         Returns:
             dict | None: OrchestraResult 스키마 딕셔너리, 타임아웃 시 None.
         """
-        result = await self._client.blpop(COMM_TASKS_KEY, timeout=timeout)
+        key = queue_key or COMM_TASKS_KEY
+        result = await self._client.blpop(key, timeout=timeout)
         if result is None:
             return None
         _, value = result

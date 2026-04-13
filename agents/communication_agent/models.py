@@ -27,6 +27,23 @@ class SlackEvent(TypedDict):
     thread_ts: str | None
 
 
+class DiscordEvent(TypedDict):
+    """Discord에서 수신된 메시지 이벤트의 표준 데이터 구조"""
+    user_id: str            # Discord 사용자 ID (int → str 변환)
+    channel_id: str         # 채널 또는 DM 채널 ID
+    guild_id: str | None    # 서버 ID (DM이면 None)
+    text: str
+    message_id: str         # 메시지 ID (스레드 추적용)
+
+
+class TelegramEvent(TypedDict):
+    """Telegram에서 수신된 메시지 이벤트의 표준 데이터 구조"""
+    user_id: str            # Telegram 사용자 ID (int → str 변환)
+    chat_id: str            # 채팅 ID (그룹/개인)
+    text: str
+    message_id: str         # 메시지 ID (진행 메시지 추적용)
+
+
 class ParsedTask(TypedDict):
     """파싱 완료된 노션 태스크의 표준 데이터 구조"""
     page_id: PageId
