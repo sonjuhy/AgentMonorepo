@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +23,7 @@ logger = logging.getLogger("orchestra_agent.health_monitor")
 _CB_THRESHOLD = 3
 _CB_WINDOW_SEC = 300
 _HEARTBEAT_VALID_SEC = 30
+_CAPABILITIES_CACHE_TTL = 30  # 캐퍼빌리티 캐시 유효 시간(초)
 
 
 def _is_heartbeat_recent(last_heartbeat: str) -> bool:
@@ -40,6 +42,8 @@ class HealthMonitor:
         else:
             redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
             self._redis = aioredis.from_url(redis_url, decode_responses=True, socket_timeout=5.0)
+        self._capabilities_cache: str = ""
+        self._capabilities_cache_at: float = 0.0
 
     async def is_agent_ready(self, agent_name: str) -> tuple[bool, str]:
         reg_raw = await self._redis.hget("agents:registry", agent_name)
@@ -61,11 +65,52 @@ class HealthMonitor:
         
         return True, "OK"
 
-    async def register_agent(self, agent_name: str, capabilities: list[str], lifecycle_type: str = "long_running") -> None:
+    async def get_nlu_capabilities(self) -> str:
+        """
+        활성화된 모든 에이전트의 NLU 설명을 집계하여 시스템 프롬프트용 문자열로 반환합니다.
+        결과는 30초간 캐싱됩니다.
+
+        각 에이전트는 자신의 Redis health 해시에 'nlu_description' 필드를 작성해야 합니다.
+        (ephemeral 에이전트는 agents:registry 의 'nlu_description' 필드를 사용합니다.)
+        """
+        now = time.monotonic()
+        if self._capabilities_cache and (now - self._capabilities_cache_at) < _CAPABILITIES_CACHE_TTL:
+            return self._capabilities_cache
+
+        try:
+            registry = await self._redis.hgetall("agents:registry")
+            lines: list[str] = []
+            for name, data_raw in registry.items():
+                data = json.loads(data_raw)
+                if data.get("lifecycle_type") == "long_running":
+                    health = await self._redis.hgetall(f"agent:{name}:health")
+                    if not _is_heartbeat_recent(health.get("last_heartbeat", "")):
+                        continue
+                    nlu_desc = health.get("nlu_description", "").strip()
+                else:
+                    # ephemeral 에이전트는 registry 등록 데이터에서 읽음
+                    nlu_desc = data.get("nlu_description", "").strip()
+
+                if nlu_desc:
+                    lines.append(nlu_desc)
+
+            result = "\n\n".join(lines)
+            if result:
+                self._capabilities_cache = result
+                self._capabilities_cache_at = now
+                return result
+        except Exception as exc:
+            logger.warning("[HealthMonitor] NLU 캐퍼빌리티 로드 실패: %s", exc)
+
+        # Redis 조회 실패 또는 등록된 에이전트 없음 → 캐시 그대로 반환 (빈 문자열 포함)
+        return self._capabilities_cache
+
+    async def register_agent(self, agent_name: str, capabilities: list[str], lifecycle_type: str = "long_running", nlu_description: str = "") -> None:
         await self._redis.hset("agents:registry", agent_name, json.dumps({
             "name": agent_name,
             "capabilities": capabilities,
             "lifecycle_type": lifecycle_type,
+            "nlu_description": nlu_description,
             "registered_at": datetime.now(timezone.utc).isoformat()
         }, ensure_ascii=False))
         logger.info("[HealthMonitor] 에이전트 등록: %s (%s)", agent_name, lifecycle_type)
@@ -116,6 +161,19 @@ class HealthMonitor:
                 "circuit_breaker_open": int(cb_failures or 0) >= _CB_THRESHOLD
             }
         return summary
+
+    async def get_all_queues_status(self) -> dict[str, dict[str, Any]]:
+        """
+        레지스트리에 등록된 모든 에이전트의 큐 길이를 반환합니다.
+        GUI 대시보드의 큐 현황 위젯에 사용합니다.
+        """
+        registry = await self._redis.hgetall("agents:registry")
+        result: dict[str, dict[str, Any]] = {}
+        for name in registry:
+            queue_key = f"agent:{name}:tasks"
+            length = await self._redis.llen(queue_key)
+            result[name] = {"queue_key": queue_key, "length": length}
+        return result
 
     async def monitor_loop(self, interval: int = 30) -> None:
         logger.info("[HealthMonitor] 감시 루프 시작 (%ds)", interval)

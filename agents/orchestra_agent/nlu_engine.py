@@ -33,13 +33,22 @@ _USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "Asia/Seoul")
 # ── 에이전트 능력 레지스트리 ──────────────────────────────────────────────────────
 
 _AGENT_CAPABILITIES = """
-- coding_agent: Python 코드 작성·TDD 실행·디버깅 (actions: execute_tdd_cycle, review_code)
-- archive_agent: Notion/Obsidian 문서 읽기·쓰기·시맨틱 검색 (actions: search_documents, write_document, read_document, sync_documents)
-- research_agent: 웹 검색·정보 수집·보고서 작성 (actions: investigate)
-- calendar_agent: 구글 캘린더 일정 CRUD (actions: create_event, query_events, update_event, delete_event)
-- file_agent: 로컬 파일 시스템 CRUD·검색 (actions: read_file, write_file, search_files, move_file, copy_file, delete_file)
-- communication_agent: 사용자에게 메시지 발송·질문 (actions: send_message, ask_clarification)
-- agent_builder: Python 또는 JavaScript 코드와 패키지 목록으로 새 에이전트를 자동 생성·패키징 (actions: build_agent, params: name[필수]/language["python"|"javascript"]/code[필수]/packages[]/port[int]/description[str]/force[bool])
+- archive_agent: Notion/Obsidian 자료 조회, 저장 및 반환 (Archive Hub)
+  - actions:
+    - list_databases: 연결된 모든 노션 데이터베이스 목록 조회
+    - get_database_schema: 특정 데이터베이스의 컬럼 구조 및 타입 파악 (params: database_id)
+    - query_database: 데이터베이스 내 아이템 목록(데이터 전체)을 가져올 때 사용 (params: database_id[선택])
+    - get_page: 특정 낱개 페이지의 상세 내용을 볼 때 사용 (params: page_id[필수])
+    - create_page: 노션에 새 페이지를 생성하거나 내용을 저장할 때 사용 (params: title[필수], database_id[선택], content[선택]) - "저장해줘", "기록해줘", "노션에 써줘" 등의 요청에 사용
+    - search: 노션/옵시디언 전체에서 검색 (params: query)
+    - read_file: 옵시디언 파일 내용 읽기 (params: page_id)
+    - analyze_task: (Legacy) 노션 태스크 기획안 생성
+
+- schedule_agent: 구글 캘린더 일정 관리 (actions: list_schedules, add_schedule, modify_schedule, remove_schedule)
+- research_agent: 웹 검색 및 정보 수집 (actions: investigate)
+- coding_agent: Python 코드 작성 및 테스트 (actions: execute_tdd_cycle)
+- file_agent: 로컬 파일 시스템 관리 (actions: read_file, write_file, search_files)
+- communication_agent: 사용자 질문 및 응답 (actions: ask_clarification)
 """.strip()
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -79,10 +88,16 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 """
 
 
-def _build_system_prompt(style_guide: dict[str, str] | None = None) -> str:
+def _build_system_prompt(
+    style_guide: dict[str, str] | None = None,
+    agent_capabilities: str | None = None,
+) -> str:
     tz = ZoneInfo(_USER_TIMEZONE)
     now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-    
+
+    # 동적으로 주입된 캐퍼빌리티가 있으면 사용, 없으면 하드코딩 폴백
+    capabilities = agent_capabilities if agent_capabilities else _AGENT_CAPABILITIES
+
     style_str = ""
     if style_guide:
         style_str = "\n# Persona & Response Style\n" + "\n".join(f"- {k}: {v}" for k, v in style_guide.items())
@@ -91,7 +106,7 @@ def _build_system_prompt(style_guide: dict[str, str] | None = None) -> str:
         current_datetime=now,
         user_timezone=_USER_TIMEZONE,
         confidence_threshold=NLU_CONFIDENCE_THRESHOLD,
-        agent_capabilities=_AGENT_CAPABILITIES,
+        agent_capabilities=capabilities,
     ) + style_str
 
 
@@ -105,15 +120,28 @@ def _build_user_prompt(user_text: str, context: list[dict[str, Any]]) -> str:
     return user_text
 
 
+import re
+
 def _parse_nlu_result(raw: str) -> NLUResult:
     """LLM 응답 문자열을 NLUResult Pydantic 모델로 파싱합니다."""
-    # 마크다운 코드블록 제거
-    raw = raw.strip()
-    if raw.startswith("```"):
-        lines = raw.split("\n")
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    # 1. 정규표현식으로 JSON 블록 추출 시도
+    # ```json ... ``` 또는 { ... } 형태를 찾음
+    json_match = re.search(r"(\{.*\})", raw, re.DOTALL)
+    if json_match:
+        raw = json_match.group(1)
+    else:
+        # 정규표현식 실패 시 기본 strip() 처리
+        raw = raw.strip()
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("[NLU] JSON 파싱 에러: %s | Raw Output: %s", e, raw)
+        raise e
+
     nlu_type = data.get("type", "single")
 
     if nlu_type == "multi_step":
@@ -176,11 +204,12 @@ class GeminiNLUEngine:
         session_id: str,
         context: list[dict[str, Any]],
         style_guide: dict[str, str] | None = None,
+        agent_capabilities: str | None = None,
     ) -> NLUResult:
         """Gemini API로 의도·에이전트·파라미터 추출 (최대 3회 재시도)."""
         from google.genai import types
 
-        system_prompt = _build_system_prompt(style_guide)
+        system_prompt = _build_system_prompt(style_guide, agent_capabilities)
         user_prompt = _build_user_prompt(user_text, context)
         last_error = ""
 
@@ -191,8 +220,8 @@ class GeminiNLUEngine:
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
-                        max_output_tokens=1024,
-                        temperature=0.1,  # 낮은 temperature로 일관된 JSON 출력
+                        max_output_tokens=2048,  # 토큰 제한 상향
+                        temperature=0.1,
                     ),
                 )
                 raw = response.text or ""
@@ -263,9 +292,10 @@ class ClaudeNLUEngine:
         session_id: str,
         context: list[dict[str, Any]],
         style_guide: dict[str, str] | None = None,
+        agent_capabilities: str | None = None,
     ) -> NLUResult:
         """Claude API로 의도 파악 (최대 3회 재시도)."""
-        system_prompt = _build_system_prompt(style_guide)
+        system_prompt = _build_system_prompt(style_guide, agent_capabilities)
         user_prompt = _build_user_prompt(user_text, context)
         last_error = ""
 

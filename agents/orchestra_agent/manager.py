@@ -1,12 +1,8 @@
 """
 오케스트라 매니저 (OrchestraManager)
 - NLU → Plan → Dispatch → Monitor 전체 파이프라인
-- Redis agent:orchestra:tasks 큐 BLPOP 메인 루프
-- 복합 작업 순차 실행 및 {{step_N.result}} 플레이스홀더 치환
-- 사용자 승인 브릿지 (Mediator)
-- implementation_spec.md 청사진 기반 구현
-  - 보완: wait_for_result → BLPOP 방식 (polling 제거)
-  - 보완: 에이전트 결과 큐 → orchestra:results:{task_id} (태스크별 격리)
+- Redis agent:orchestra:tasks 큐 수신 및 세션/스레드 기반 컨텍스트 관리
+- SQLite 영구 저장소 연동 (StateManager)
 """
 
 from __future__ import annotations
@@ -41,16 +37,20 @@ from .state_manager import StateManager
 
 logger = logging.getLogger("orchestra_agent.manager")
 
-# Redis 큐 키
+# Redis 설정
 _ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
 _RESULTS_KEY_PREFIX = "orchestra:results:"
 _APPROVAL_KEY_PREFIX = "orchestra:approval:"
-
-# 메시지 버전
 _MSG_VERSION = "1.1"
-
-# 승인 대기 최대 시간 (5분)
 _APPROVAL_TIMEOUT_SEC = 300
+
+# 플랫폼별 통신 큐 (source → queue key)
+_PLATFORM_COMM_QUEUE: dict[str, str] = {
+    "slack": "agent:communication:tasks",
+    "discord": "agent:communication:discord:tasks",
+    "telegram": "agent:communication:telegram:tasks",
+}
+_DEFAULT_COMM_QUEUE = "agent:communication:tasks"
 
 
 def _build_dispatch_message(
@@ -61,6 +61,7 @@ def _build_dispatch_message(
     params: dict[str, Any],
     requester: dict[str, str],
     timeout: int,
+    content: str = "",
     step_info: dict[str, int] | None = None,
     retry_info: RetryInfo | None = None,
     requires_approval: bool = False,
@@ -72,6 +73,7 @@ def _build_dispatch_message(
         "session_id": session_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "requester": requester,
+        "content": content,
         "agent": agent_name,
         "action": action,
         "params": params,
@@ -86,19 +88,8 @@ def _build_dispatch_message(
     }
 
 
-def resolve_placeholders(
-    params: dict[str, Any], results: dict[int, dict[str, Any]]
-) -> dict[str, Any]:
-    """
-    {{step_N.result.field}} 형식의 플레이스홀더를 실제 결과로 치환합니다.
-
-    Args:
-        params: 플레이스홀더가 포함된 파라미터 딕셔너리.
-        results: step 번호 → AgentResult 딕셔너리.
-
-    Returns:
-        치환이 완료된 파라미터 딕셔너리.
-    """
+def resolve_placeholders(params: dict[str, Any], results: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """{{step_N.result.field}} 형식의 플레이스홀더를 실제 결과로 치환합니다."""
     params_str = json.dumps(params, ensure_ascii=False)
 
     def replacer(match: re.Match) -> str:
@@ -119,16 +110,6 @@ def resolve_placeholders(
 class OrchestraManager:
     """
     오케스트라 에이전트 메인 관제 클래스.
-
-    역할:
-        - agent:orchestra:tasks 큐에서 작업 수신
-        - NLU로 의도 파악 및 에이전트 선택
-        - 단일 / 복합 작업 라우팅
-        - 에이전트 결과 수집 및 사용자 승인 브릿지
-        - Circuit Breaker 연동
-
-    환경 변수:
-        REDIS_URL: Redis 접속 URL (기본값: redis://localhost:6379)
     """
 
     def __init__(
@@ -142,593 +123,194 @@ class OrchestraManager:
             self._redis = redis_client
         else:
             redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
-            self._redis = aioredis.from_url(
-                redis_url,
-                decode_responses=True,
-                socket_timeout=5.0,
-            )
+            self._redis = aioredis.from_url(redis_url, decode_responses=True, socket_timeout=5.0)
 
         self._nlu = nlu_engine or build_nlu_engine()
         self._state = state_manager or StateManager(redis_client=self._redis)
         self._health = health_monitor or HealthMonitor(redis_client=self._redis)
 
-    # ── 메인 루프 ─────────────────────────────────────────────────────────────
-
     async def listen_tasks(self) -> None:
-        """
-        agent:orchestra:tasks 큐를 BLPOP으로 감시하는 메인 루프입니다.
-        각 태스크를 비동기 Task로 독립적으로 처리합니다.
-        """
-        logger.info(
-            "[OrchestraManager] 메인 루프 시작 (queue=%s)", _ORCHESTRA_TASKS_KEY
-        )
+        """메인 루프: Redis 큐에서 작업을 수신합니다."""
+        logger.info("[OrchestraManager] 메인 루프 시작")
         while True:
             try:
                 result = await self._redis.blpop(_ORCHESTRA_TASKS_KEY, timeout=5)
-                if result is None:
-                    continue  # timeout — 계속 대기
+                if result is None: continue
 
                 _, raw = result
                 task: OrchestraTask = json.loads(raw)
-                asyncio.create_task(
-                    self._safe_process_task(task),
-                    name=f"task-{task.get('task_id', 'unknown')}",
-                )
-
-            except asyncio.CancelledError:
-                logger.info("[OrchestraManager] 메인 루프 종료")
-                break
+                asyncio.create_task(self._safe_process_task(task))
+            except asyncio.CancelledError: break
             except Exception as exc:
                 logger.error("[OrchestraManager] 루프 오류: %s", exc)
                 await asyncio.sleep(1.0)
 
     async def _safe_process_task(self, task: OrchestraTask) -> None:
-        """process_task의 예외를 포착하여 안전하게 처리합니다."""
         try:
             await self.process_task(task)
         except Exception as exc:
-            logger.exception(
-                "[OrchestraManager] 태스크 처리 중 예외: task_id=%s: %s",
-                task.get("task_id"),
-                exc,
-            )
+            logger.exception("[OrchestraManager] 태스크 처리 실패: %s", exc)
             await self._send_error_to_user(task, str(exc))
 
-    # ── 태스크 처리 파이프라인 ────────────────────────────────────────────────
-
     async def process_task(self, task: OrchestraTask) -> None:
-        """
-        단일 태스크 처리 파이프라인: NLU → Plan → Dispatch → Monitor.
-
-        Args:
-            task: 소통 에이전트로부터 수신된 작업 요청.
-        """
-        task_id = task.get("task_id", "")
-        session_id = task.get("session_id", "")
+        """NLU → Plan → Dispatch → Monitor 파이프라인"""
         user_text = task.get("content", "")
         requester = task.get("requester", {})
-
-        logger.info(
-            "[Manager] 태스크 처리 시작 task_id=%s session=%s", task_id, session_id
-        )
-
-        # 세션 초기화 및 상태 기록
         user_id = requester.get("user_id", "unknown")
-        await self._state.init_session(
-            session_id,
-            user_id,
-            requester.get("channel_id", ""),
-        )
-        await self._state.add_message(session_id, user_id, "user", user_text, provider="slack")
-        await self._state.update_task_state(
-            task_id,
-            {
-                "status": "PROCESSING",
-                "session_id": session_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        channel_id = requester.get("channel_id", "unknown")
+        thread_id = requester.get("thread_ts")
+        session_id = thread_id if thread_id else task.get("session_id", str(uuid.uuid4()))
+        task_id = task.get("task_id", str(uuid.uuid4()))
 
-        # NLU 의도 파악
-        context = await self._state.build_context_for_llm(session_id, user_id, provider="gemini")
+        await self._state.init_session(session_id, user_id, channel_id)
+        await self._state.add_message(session_id, user_id, "user", user_text, provider="slack", thread_id=thread_id)
+        
+        await self._state.update_task_state(task_id, {"status": "PROCESSING", "session_id": session_id})
+
+        context = await self._state.build_context_for_llm(session_id, user_id)
         summary_data = await self._state.get_session_context_summary(session_id)
-        
+
+        # 활성 에이전트 캐퍼빌리티를 Redis에서 동적으로 로드 (미등록 시 NLU 엔진 내부 폴백 사용)
+        agent_capabilities = await self._health.get_nlu_capabilities() or None
+
         nlu_result: NLUResult = await self._nlu.analyze(
-            user_text, 
-            session_id, 
-            context,
-            style_guide=summary_data.get("style")
+            user_text, session_id, context,
+            style_guide=summary_data.get("style"),
+            agent_capabilities=agent_capabilities,
         )
 
-        # ── 에이전트 선택 로그 출력 ───────────────────────────────────────────
-        reason = nlu_result.metadata.reason if hasattr(nlu_result, "metadata") else "사유 없음"
-        confidence = nlu_result.metadata.confidence_score if hasattr(nlu_result, "metadata") else 0.0
-        
         if nlu_result.type == "direct_response":
-            logger.info("[Manager] 판단: [직접 답변 (orchestra)] - 사유: %s (신뢰도: %.2f)", reason, confidence)
-        elif nlu_result.type == "clarification":
-            logger.info("[Manager] 판단: [추가 질문 (communication_agent)] - 사유: %s (신뢰도: %.2f)", reason, confidence)
-        elif nlu_result.type == "multi_step":
-            agents = [step.selected_agent for step in nlu_result.plan]
-            logger.info("[Manager] 판단: [복합 작업 (%s)] - 사유: %s (신뢰도: %.2f)", " -> ".join(agents), reason, confidence)
-        else: # single
-            logger.info("[Manager] 판단: [단일 작업 (%s)] - 사유: %s (신뢰도: %.2f)", nlu_result.selected_agent, reason, confidence)
-        # ──────────────────────────────────────────────────────────────────
-
-        # 타입별 처리 분기
-        if nlu_result.type == "direct_response":
-            await self._send_to_comm_agent(
-                task=task,
-                content=nlu_result.params["answer"],
-                requires_approval=False,
-                agent_name="orchestra",
-            )
-
+            await self._send_to_comm_agent(task, nlu_result.params["answer"], False, "orchestra")
         elif nlu_result.type == "clarification":
             await self._route_clarification(nlu_result, task)
-
         elif nlu_result.type == "multi_step":
             await self.run_plan(nlu_result, task)
-
-        else:  # single
-            await self._route_single(nlu_result, task)  # type: ignore[arg-type]
-
-        # 컨텍스트 요약 (필요 시)
-        await self._state.maybe_summarize(session_id)
+        else:
+            await self._route_single(nlu_result, task)
 
     async def _route_clarification(self, nlu_result: Any, task: OrchestraTask) -> None:
-        """추가 질문 필요 시 소통 에이전트로 전달합니다."""
-        question = nlu_result.params.question
-        options = nlu_result.params.options
-        content = question
-        if options:
-            content += "\n\n" + "\n".join(f"• {opt}" for opt in options)
+        content = nlu_result.params.question
+        if nlu_result.params.options:
+            content += "\n\n" + "\n".join(f"• {opt}" for opt in nlu_result.params.options)
+        await self._send_to_comm_agent(task, content, False, "communication_agent")
 
-        await self._send_to_comm_agent(
-            task=task,
-            content=content,
-            requires_approval=False,
-            agent_name="communication_agent",
-        )
-
-    async def _route_single(
-        self, nlu_result: SingleNLUResult, task: OrchestraTask
-    ) -> None:
-        """단일 에이전트 작업을 라우팅합니다."""
+    async def _route_single(self, nlu_result: SingleNLUResult, task: OrchestraTask) -> None:
         agent_name = nlu_result.selected_agent
         dispatch_task_id = str(uuid.uuid4())
 
-        # ── 로컬 직접 실행 에이전트 (Redis 큐 미사용) ────────────────────────
-        if agent_name == "agent_builder":
-            result = await self._run_agent_builder(nlu_result.params, dispatch_task_id)
-            await self._handle_agent_result(
-                result, task, nlu_result.metadata.requires_user_approval
-            )
-            return
-
-        # ── 일반 에이전트: 활성 상태 체크 → Dispatch → Wait ─────────────────
         ready, reason = await self._health.is_agent_ready(agent_name)
         if not ready:
             await self._send_agent_unavailable_error(task, agent_name, reason)
             return
 
         timeout = AGENT_TIMEOUT_MAP.get(agent_name, 300)
-
         dispatch = _build_dispatch_message(
-            task_id=dispatch_task_id,
-            session_id=task["session_id"],
-            agent_name=agent_name,
-            action=nlu_result.action,
-            params=nlu_result.params,
-            requester=task["requester"],
-            timeout=timeout,
-            requires_approval=nlu_result.metadata.requires_user_approval,
+            dispatch_task_id, task["session_id"], agent_name, nlu_result.action,
+            nlu_result.params, task["requester"], timeout, content=task.get("content", ""),
+            requires_approval=nlu_result.metadata.requires_user_approval
         )
 
         await self._dispatch_to_agent(agent_name, dispatch)
-        await self._state.update_task_state(
-            dispatch_task_id,
-            {
-                "status": "PENDING",
-                "session_id": task["session_id"],
-                "agent": agent_name,
-            },
-        )
-
-        # 결과 수신 대기
         result = await self.wait_for_result(dispatch_task_id, timeout=timeout)
-        await self._handle_agent_result(
-            result, task, nlu_result.metadata.requires_user_approval
-        )
+        await self._handle_agent_result(result, task, nlu_result.metadata.requires_user_approval)
 
-    async def _run_agent_builder(
-        self, params: dict[str, Any], task_id: str
-    ) -> dict[str, Any]:
-        """
-        AgentBuilderHandler를 직접 호출합니다 (Redis 큐 불필요).
-        tools/agent_builder/가 모노리포 루트에 존재해야 합니다.
-        """
-        from .agent_builder_handler import AgentBuilderHandler
-
-        handler = AgentBuilderHandler()
-        logger.info("[Manager] AgentBuilder 로컬 실행 task_id=%s", task_id)
-        return await handler.build_agent(params, task_id)
-
-    # ── 복합 작업 플래너 ──────────────────────────────────────────────────────
-
-    async def run_plan(
-        self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask
-    ) -> None:
-        """
-        plan 배열의 각 step을 depends_on을 고려하여 순차 실행합니다.
-
-        Args:
-            nlu_result: multi_step NLU 결과.
-            original_task: 원래 수신된 작업 요청.
-        """
+    async def run_plan(self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask) -> None:
         plan = nlu_result.plan
         results: dict[int, dict[str, Any]] = {}
         total_steps = len(plan)
 
-        logger.info(
-            "[Manager] 복합 작업 시작: %d단계 session=%s",
-            total_steps,
-            original_task["session_id"],
-        )
-
         for step in sorted(plan, key=lambda s: s.step):
-            # 선행 단계 완료 대기
-            for dep_step in step.depends_on:
-                waited = 0
-                while dep_step not in results and waited < 60:
-                    await asyncio.sleep(0.5)
-                    waited += 0.5
-                if dep_step not in results:
-                    logger.error(
-                        "[Manager] 의존 단계 %d 타임아웃 — 복합 작업 중단", dep_step
-                    )
-                    await self._send_error_to_user(
-                        original_task, f"단계 {dep_step} 결과를 받지 못했습니다.", agent_name="orchestra"
-                    )
-                    return
-
-            # 플레이스홀더 치환
             params = resolve_placeholders(step.params, results)
-
-            # 에이전트 활성 상태 체크
-            ready, reason = await self._health.is_agent_ready(step.selected_agent)
-            if not ready:
-                await self._send_agent_unavailable_error(original_task, step.selected_agent, reason)
-                return
-
-            # 단계 실행
             dispatch_task_id = str(uuid.uuid4())
             timeout = AGENT_TIMEOUT_MAP.get(step.selected_agent, 300)
+            
             dispatch = _build_dispatch_message(
-                task_id=dispatch_task_id,
-                session_id=original_task["session_id"],
-                agent_name=step.selected_agent,
-                action=step.action,
-                params=params,
-                requester=original_task["requester"],
-                timeout=timeout,
+                dispatch_task_id, original_task["session_id"], step.selected_agent,
+                step.action, params, original_task["requester"], timeout,
+                content=original_task.get("content", ""),
                 step_info={"current": step.step, "total": total_steps},
-                requires_approval=step.metadata.requires_user_approval,
+                requires_approval=step.metadata.requires_user_approval
             )
 
-            # 진행 상황 알림
-            await self._send_progress_to_comm(
-                original_task,
-                percent=int((step.step - 1) / total_steps * 100),
-                message=f"[{step.step}/{total_steps}] {step.selected_agent} 작업 중...",
-            )
-
+            await self._send_progress_to_comm(original_task, int((step.step-1)/total_steps*100), f"[{step.step}/{total_steps}] {step.selected_agent} 작업 중...")
             await self._dispatch_to_agent(step.selected_agent, dispatch)
             result = await self.wait_for_result(dispatch_task_id, timeout=timeout)
-            results[step.step] = result.get("result_data", {})
-
-            # 실패 처리
+            
             if result.get("status") == "FAILED":
-                error_msg = result.get("error", {}).get("message", "알 수 없는 오류")
-                logger.error("[Manager] 단계 %d 실패: %s", step.step, error_msg)
-                await self._health.record_failure(step.selected_agent)
-                await self._send_error_to_user(
-                    original_task,
-                    f"단계 {step.step} 실패: {error_msg}",
-                    agent_name=step.selected_agent
-                )
+                await self._send_error_to_user(original_task, result.get("error", {}).get("message", "오류"), step.selected_agent)
                 return
 
-            await self._health.record_success(step.selected_agent)
-
-            # 승인 필요 단계 처리
+            results[step.step] = result.get("result_data", {})
             if step.metadata.requires_user_approval:
-                approved = await self.request_user_approval(result, original_task)
-                if not approved:
-                    await self.notify_cancellation(original_task)
-                    return
+                if not await self.request_user_approval(result, original_task): return
 
-        # 최종 결과 전달
-        final_result_data = results.get(plan[-1].step, {})
-        summary = final_result_data.get("summary", "모든 단계가 완료되었습니다.")
-        body = final_result_data.get("raw_text", "")
-        content = f"{summary}\n\n{body}".strip() if body else summary
-
-        await self._send_to_comm_agent(
-            task=original_task,
-            content=content,
-            requires_approval=False,
-            agent_name="orchestra",
-        )
-
-    # ── 결과 수집 ─────────────────────────────────────────────────────────────
+        final_res = results.get(plan[-1].step, {})
+        summary = final_res.get("summary", "모든 단계가 완료되었습니다.")
+        content = final_res.get("content", "")
+        full_message = f"{summary}\n\n{content}".strip() if content else summary
+        await self._send_to_comm_agent(original_task, full_message, False, "orchestra")
 
     async def wait_for_result(self, task_id: str, timeout: int = 600) -> dict[str, Any]:
-        """
-        orchestra:results:{task_id} 큐에서 BLPOP으로 결과를 대기합니다.
-
-        명세서 보완: polling(asyncio.sleep(1)) 대신 BLPOP 사용으로 즉시 수신.
-
-        Args:
-            task_id: 대기할 태스크 ID.
-            timeout: 최대 대기 시간 (초).
-
-        Returns:
-            AgentResult 딕셔너리. 타임아웃 시 FAILED 상태 반환.
-        """
         key = f"{_RESULTS_KEY_PREFIX}{task_id}"
         remaining = timeout
-
         while remaining > 0:
-            wait_sec = min(5, remaining)  # 최대 5초 단위로 BLPOP
-            result = await self._redis.blpop(key, timeout=wait_sec)
-            if result:
-                _, raw = result
-                data: dict[str, Any] = json.loads(raw)
-                logger.info(
-                    "[Manager] 결과 수신 task_id=%s status=%s",
-                    task_id,
-                    data.get("status"),
-                )
-                return data
-            remaining -= wait_sec
-
-        logger.warning(
-            "[Manager] 결과 타임아웃 task_id=%s timeout=%ds", task_id, timeout
-        )
-        return {
-            "task_id": task_id,
-            "status": "FAILED",
-            "agent": "unknown",
-            "result_data": {},
-            "error": {
-                "code": "TIMEOUT",
-                "message": f"{timeout}초 내 응답 없음",
-                "traceback": None,
-            },
-            "usage_stats": {},
-        }
+            res = await self._redis.blpop(key, timeout=min(5, remaining))
+            if res: return json.loads(res[1])
+            remaining -= 5
+        return {"status": "FAILED", "error": {"message": "타임아웃"}}
 
     async def receive_agent_result(self, result: AgentResult) -> None:
-        """
-        하위 에이전트로부터 HTTP를 통해 결과를 수신하여
-        orchestra:results:{task_id} 큐에 push합니다.
-
-        FastAPI POST /results 엔드포인트에서 호출됩니다.
-
-        Args:
-            result: 에이전트 실행 결과.
-        """
         task_id = result["task_id"]
-        key = f"{_RESULTS_KEY_PREFIX}{task_id}"
-        await self._redis.rpush(key, json.dumps(result, ensure_ascii=False))
-        await self._state.update_task_state(task_id, {"status": result["status"]})
-        logger.info(
-            "[Manager] 결과 저장 task_id=%s status=%s", task_id, result["status"]
-        )
+        await self._redis.rpush(f"{_RESULTS_KEY_PREFIX}{task_id}", json.dumps(result, ensure_ascii=False))
 
-    # ── 에이전트 결과 처리 ────────────────────────────────────────────────────
-
-    async def _handle_agent_result(
-        self,
-        result: dict[str, Any],
-        task: OrchestraTask,
-        requires_approval: bool,
-    ) -> None:
-        """단일 작업 결과를 처리합니다 (소통 에이전트 전달 또는 승인 요청)."""
-        status = result.get("status", "FAILED")
-        agent_name = result.get("agent", "에이전트")
-
-        if status == "FAILED":
-            error_msg = result.get("error", {}).get("message", "알 수 없는 오류")
-            await self._health.record_failure(agent_name)
-            await self._send_error_to_user(task, error_msg, agent_name=agent_name)
+    async def _handle_agent_result(self, result: dict[str, Any], task: OrchestraTask, requires_approval: bool) -> None:
+        if result.get("status") == "FAILED":
+            await self._send_error_to_user(task, result.get("error", {}).get("message", "오류"), result.get("agent"))
             return
-
-        await self._health.record_success(agent_name)
-
-        result_data = result.get("result_data", {})
-        summary = result_data.get("summary", "작업이 완료되었습니다.")
-        body = result_data.get("raw_text", "")
-        content = f"{summary}\n\n{body}".strip() if body else summary
+        
+        res_data = result.get("result_data", {})
+        summary = res_data.get("summary", "작업 완료")
+        content = res_data.get("content", "")
+        full_message = f"{summary}\n\n{content}".strip() if content else summary
 
         if requires_approval:
-            approved = await self.request_user_approval(result, task)
-            if not approved:
-                await self.notify_cancellation(task)
-                return
+            if not await self.request_user_approval(result, task): return
+        await self._send_to_comm_agent(task, full_message, False, result.get("agent", "agent"))
 
-        await self._send_to_comm_agent(
-            task=task,
-            content=content,
-            requires_approval=False,
-            agent_name=agent_name,
-        )
+    def _get_comm_queue(self, task: OrchestraTask) -> str:
+        """태스크의 source 필드를 기반으로 플랫폼별 통신 큐 키를 반환합니다."""
+        source = task.get("source", "slack")
+        return _PLATFORM_COMM_QUEUE.get(source, _DEFAULT_COMM_QUEUE)
 
-    # ── 사용자 승인 브릿지 ────────────────────────────────────────────────────
+    async def request_user_approval(self, result: dict[str, Any], task: OrchestraTask) -> bool:
+        approval_id = str(uuid.uuid4())
+        msg: CommAgentMessage = {"task_id": approval_id, "content": f"승인 필요: {result.get('result_data', {}).get('summary')}", "requires_user_approval": True, "agent_name": result.get("agent")}
+        comm_queue = self._get_comm_queue(task)
+        await self._redis.rpush(comm_queue, json.dumps(msg, ensure_ascii=False))
+        res = await self._redis.blpop(f"{_APPROVAL_KEY_PREFIX}{approval_id}", timeout=_APPROVAL_TIMEOUT_SEC)
+        return json.loads(res[1]).get("action") == "approve" if res else False
 
-    async def request_user_approval(
-        self,
-        result: dict[str, Any],
-        original_task: OrchestraTask,
-    ) -> bool:
-        """
-        소통 에이전트로 승인 요청을 발송하고 사용자 응답을 대기합니다.
+    async def _dispatch_to_agent(self, agent_name: str, dispatch: DispatchMessage) -> None:
+        await self._redis.rpush(f"agent:{agent_name}:tasks", json.dumps(dispatch, ensure_ascii=False))
 
-        승인 응답은 orchestra:approval:{approval_task_id} 큐로 수신됩니다.
-        (소통 에이전트의 push_approval이 task별 큐에 push)
+    async def _send_to_comm_agent(self, task: OrchestraTask, content: str, requires_approval: bool, agent_name: str) -> None:
+        req = task.get("requester", {})
+        session_id = req.get("thread_ts") or task.get("session_id")
+        if session_id:
+            await self._state.add_message(session_id, req.get("user_id", "unknown"), "assistant", content, provider="orchestra")
 
-        Args:
-            result: 승인 대상 에이전트 결과.
-            original_task: 원래 수신된 작업 요청.
+        msg: CommAgentMessage = {"task_id": task.get("task_id", str(uuid.uuid4())), "content": content, "requires_user_approval": requires_approval, "agent_name": agent_name}
+        comm_queue = self._get_comm_queue(task)
+        await self._redis.rpush(comm_queue, json.dumps(msg, ensure_ascii=False))
 
-        Returns:
-            True: 승인, False: 거절/취소/타임아웃
-        """
-        approval_task_id = str(uuid.uuid4())
-        result_data = result.get("result_data", {})
-        summary = result_data.get("summary", "결과를 확인해 주세요.")
-        content = f"*승인이 필요한 작업이 완료되었습니다.*\n\n{summary}"
+    async def _send_progress_to_comm(self, task: OrchestraTask, percent: int, message: str) -> None:
+        msg: CommAgentMessage = {"task_id": task.get("task_id", str(uuid.uuid4())), "content": message, "requires_user_approval": False, "agent_name": "orchestra", "progress_percent": percent}
+        comm_queue = self._get_comm_queue(task)
+        await self._redis.rpush(comm_queue, json.dumps(msg, ensure_ascii=False))
 
-        # 소통 에이전트로 승인 요청 메시지 전달
-        approval_msg: CommAgentMessage = {
-            "task_id": approval_task_id,
-            "content": content,
-            "requires_user_approval": True,
-            "agent_name": result.get("agent", "에이전트"),
-            "progress_percent": None,
-        }
-        await self._redis.rpush(
-            "agent:communication:tasks",
-            json.dumps(approval_msg, ensure_ascii=False),
-        )
-        logger.info("[Manager] 승인 요청 발송 approval_task_id=%s", approval_task_id)
+    async def _send_error_to_user(self, task: OrchestraTask, error_message: str, agent_name: str = "orchestra") -> None:
+        content = f"[{agent_name}] 오류: {error_message}"
+        await self._send_to_comm_agent(task, content, False, agent_name)
 
-        # 사용자 응답 대기 (최대 5분)
-        approval_key = f"{_APPROVAL_KEY_PREFIX}{approval_task_id}"
-        resp_raw = await self._redis.blpop(approval_key, timeout=_APPROVAL_TIMEOUT_SEC)
-
-        if not resp_raw:
-            logger.warning(
-                "[Manager] 승인 타임아웃 approval_task_id=%s", approval_task_id
-            )
-            return False
-
-        _, raw = resp_raw
-        resp = json.loads(raw)
-        action = resp.get("action", "cancel")
-        logger.info("[Manager] 승인 응답 수신 action=%s", action)
-        return action == "approve"
-
-    async def notify_cancellation(self, original_task: OrchestraTask) -> None:
-        """작업 취소를 사용자에게 알립니다."""
-        await self._send_to_comm_agent(
-            task=original_task,
-            content="✋ 작업이 취소되었습니다.",
-            requires_approval=False,
-            agent_name="orchestra",
-        )
-
-    # ── 내부 유틸리티 ─────────────────────────────────────────────────────────
-
-    async def _dispatch_to_agent(
-        self, agent_name: str, dispatch: DispatchMessage
-    ) -> None:
-        """에이전트 큐에 작업 지시서를 전달합니다."""
-        queue_key = f"agent:{agent_name}:tasks"
-        await self._redis.rpush(queue_key, json.dumps(dispatch, ensure_ascii=False))
-        logger.info(
-            "[Manager] 디스패치 → %s task_id=%s", agent_name, dispatch["task_id"]
-        )
-
-    async def _send_to_comm_agent(
-        self,
-        task: OrchestraTask,
-        content: str,
-        requires_approval: bool,
-        agent_name: str,
-    ) -> None:
-        """소통 에이전트로 최종 메시지를 전달합니다."""
-        # 원래의 task_id를 유지하여 소통 에이전트가 채널/스레드 컨텍스트를 찾을 수 있게 함
-        task_id = task.get("task_id", str(uuid.uuid4()))
-        msg: CommAgentMessage = {
-            "task_id": task_id,
-            "content": content,
-            "requires_user_approval": requires_approval,
-            "agent_name": agent_name,
-            "progress_percent": None,
-        }
-        await self._redis.rpush(
-            "agent:communication:tasks", json.dumps(msg, ensure_ascii=False)
-        )
-        logger.debug("[Manager] 소통 에이전트 전달 task_id=%s", task_id)
-
-    async def _send_progress_to_comm(
-        self,
-        task: OrchestraTask,
-        percent: int,
-        message: str,
-    ) -> None:
-        """진행 상황을 소통 에이전트로 전달합니다."""
-        # 원래의 task_id를 유지함
-        task_id = task.get("task_id", str(uuid.uuid4()))
-        msg: CommAgentMessage = {
-            "task_id": task_id,
-            "content": message,
-            "requires_user_approval": False,
-            "agent_name": "orchestra",
-            "progress_percent": percent,
-        }
-        await self._redis.rpush(
-            "agent:communication:tasks", json.dumps(msg, ensure_ascii=False)
-        )
-
-    async def _send_error_to_user(
-        self, task: OrchestraTask, error_message: str, agent_name: str = "orchestra"
-    ) -> None:
-        """
-        에러 메시지를 [작업내용][에이전트] - [에러내역] 형식으로 전달합니다.
-        """
-        work_name = task.get("content", "알 수 없는 작업")
-        if len(work_name) > 30:
-            work_name = work_name[:27] + "..."
-            
-        formatted_content = f"[{work_name}][{agent_name}] - {error_message}"
-        
-        await self._send_to_comm_agent(
-            task=task,
-            content=formatted_content,
-            requires_approval=False,
-            agent_name=agent_name,
-        )
-
-    async def _send_fallback_message(
-        self, task: OrchestraTask, agent_name: str
-    ) -> None:
-        """Circuit Breaker로 차단된 에이전트에 대한 안내 메시지를 전달합니다."""
-        await self._send_to_comm_agent(
-            task=task,
-            content=f"⚠️ *{agent_name}* 에이전트가 일시적으로 사용 불가 상태입니다. 잠시 후 다시 시도해 주세요.",
-            requires_approval=False,
-            agent_name="orchestra",
-        )
-
-    async def _send_agent_unavailable_error(
-        self, task: OrchestraTask, agent_name: str, reason: str
-    ) -> None:
-        """
-        에이전트가 사용 불가능한 원인을 상세히 사용자에게 전달합니다.
-        """
-        messages = {
-            "NOT_FOUND": f"에이전트 `{agent_name}`가 시스템에 등록되지 않았습니다.",
-            "INACTIVE": f"에이전트 `{agent_name}`가 현재 오프라인 상태입니다.",
-            "CIRCUIT_OPEN": f"에이전트 `{agent_name}`에 오류가 빈번하여 보호를 위해 일시 차단되었습니다.",
-            "MAINTENANCE": f"에이전트 `{agent_name}`가 점검 중입니다.",
-        }
-        error_msg = messages.get(reason, f"에이전트 `{agent_name}`를 사용할 수 없습니다. (사유: {reason})")
-        
-        await self._send_error_to_user(
-            task=task,
-            error_message=f"작업을 중단합니다: {error_msg}",
-            agent_name="orchestra"
-        )
+    async def _send_agent_unavailable_error(self, task: OrchestraTask, agent_name: str, reason: str) -> None:
+        await self._send_error_to_user(task, f"에이전트 {agent_name} 사용 불가 ({reason})")

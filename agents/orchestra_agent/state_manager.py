@@ -1,13 +1,12 @@
 """
 세션 상태 및 대화 이력 관리 (State Manager)
-- User Profile: 사용자별 성향 및 정보 (Persistent)
-- Redis Hash: 세션 상태 (TTL: 2시간)
-- Redis List: 최근 메시지 슬라이딩 윈도우 (최대 20개)
-- DB (PostgreSQL, MySQL, SQLite): 영구 이력 저장
+- SQLite: 대화 이력, 사용자 프로필, 에이전트 로그 영구 저장
+- Redis: 실시간 태스크 상태 및 빠른 메시지 캐싱
 """
 
 from __future__ import annotations
 
+import aiosqlite
 import json
 import logging
 import os
@@ -21,7 +20,8 @@ logger = logging.getLogger("orchestra_agent.state_manager")
 
 _SESSION_TTL = 7200
 _TASK_TTL = 86400
-_MAX_MESSAGES = 20
+_MAX_MESSAGES = 20          # Redis 캐시 유지 수
+_HISTORY_LIMIT = 10         # LLM 컨텍스트 포함 DB 이력 수
 _SUMMARIZE_THRESHOLD = 20
 
 
@@ -35,280 +35,135 @@ class StateManager:
                 redis_url, decode_responses=True, socket_timeout=60.0
             )
 
-        self._db_pool = None
-        self._db_type = ""
-        self._db_enabled = False
+        self._db_path = os.environ.get("DATABASE_PATH", "sqlite_db.db")
+        self._db_conn: aiosqlite.Connection | None = None
 
-    async def init_db(self) -> None:
-        db_url = os.environ.get("DATABASE_URL", "sqlite://sqlite_db.db")
-        if not db_url:
-            return
-        try:
-            if db_url.startswith("postgresql"):
-                import asyncpg
+    async def ensure_db(self) -> aiosqlite.Connection:
+        """SQLite 연결 보장 및 테이블 초기화"""
+        if self._db_conn is None:
+            self._db_conn = await aiosqlite.connect(self._db_path)
+            self._db_conn.row_factory = aiosqlite.Row
+            await self._create_tables()
+        return self._db_conn
 
-                self._db_pool = await asyncpg.create_pool(
-                    db_url, min_size=1, max_size=5
-                )
-                self._db_type = "postgresql"
-            elif db_url.startswith("mysql"):
-                import aiomysql
-
-                match = re.match(
-                    r"mysql://([^:]+):([^@]+)@([^:/]+):?(\d+)?/(.+)", db_url
-                )
-                if match:
-                    u, p, h, pt, d = match.groups()
-                    self._db_pool = await aiomysql.create_pool(
-                        host=h,
-                        port=int(pt or 3306),
-                        user=u,
-                        password=p,
-                        db=d,
-                        autocommit=True,
-                    )
-                    self._db_type = "mysql"
-            elif db_url.startswith("sqlite"):
-                import aiosqlite
-
-                self._db_pool = await aiosqlite.connect(db_url.split("://")[-1])
-                self._db_type = "sqlite"
-
-            if self._db_pool:
-                self._db_enabled = True
-                await self._create_tables_if_not_exists()
-        except Exception as exc:
-            logger.warning("[StateManager] DB 초기화 실패: %s", exc)
-
-    async def _create_tables_if_not_exists(self) -> None:
-        # 사용자 테이블 및 대화 이력 테이블(user_id 추가) 생성
-        queries = []
-        if self._db_type == "postgresql":
-            queries = [
-                "CREATE TABLE IF NOT EXISTS users (user_id VARCHAR(100) PRIMARY KEY, name VARCHAR(100), style_pref JSONB, created_at TIMESTAMP DEFAULT NOW())",
-                "CREATE TABLE IF NOT EXISTS chat_history (id SERIAL PRIMARY KEY, user_id VARCHAR(100), session_id VARCHAR(100), role VARCHAR(20), content TEXT, provider VARCHAR(50), tokens_in INTEGER, created_at TIMESTAMP DEFAULT NOW())",
-            ]
-        elif self._db_type == "mysql":
-            queries = [
-                "CREATE TABLE IF NOT EXISTS users (user_id VARCHAR(100) PRIMARY KEY, name VARCHAR(100), style_pref JSON, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-                "CREATE TABLE IF NOT EXISTS chat_history (id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(100), session_id VARCHAR(100), role VARCHAR(20), content TEXT, provider VARCHAR(50), tokens_in INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-            ]
-        else:  # sqlite
-            queries = [
-                "CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, name TEXT, style_pref TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-                "CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, session_id TEXT, role TEXT, content TEXT, provider TEXT, tokens_in INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-            ]
-
+    async def _create_tables(self) -> None:
+        queries = [
+            "CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, name TEXT, style_pref TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, session_id TEXT, thread_id TEXT, role TEXT, content TEXT, provider TEXT, tokens_in INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, user_id TEXT, channel_id TEXT, last_summary TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS agent_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_name TEXT, task_id TEXT, session_id TEXT, action TEXT, message TEXT, payload TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        ]
+        db = await self.ensure_db()
         for q in queries:
-            try:
-                if self._db_type == "postgresql":
-                    await self._db_pool.execute(q)
-                elif self._db_type == "mysql":
-                    async with self._db_pool.acquire() as conn:
-                        async with conn.cursor() as cur:
-                            await cur.execute(q)
-                elif self._db_type == "sqlite":
-                    await self._db_pool.execute(q)
-                    await self._db_pool.commit()
-            except Exception as e:
-                logger.error("[StateManager] 테이블 생성 실패: %s", e)
+            await db.execute(q)
+        await db.commit()
 
-    # ── 사용자 프로필 관리 ──────────────────────────────────────────────────
+    # ── 사용자 관리 ─────────────────────────────────────────────────────────
 
     async def get_user_profile(self, user_id: str) -> dict[str, Any]:
-        """사용자 프로필을 Redis 또는 DB에서 가져옵니다."""
-        key = f"user:{user_id}:profile"
-        profile = await self._redis.hgetall(key)
+        db = await self.ensure_db()
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+        
+        if row:
+            profile = dict(row)
+            profile["style_pref"] = json.loads(profile.get("style_pref", "{}"))
+            return profile
 
-        if not profile and self._db_enabled:
-            # DB에서 조회 로직 (생략 가능하나 완결성을 위해 구조만 유지)
-            pass
-
-        if not profile:
-            # 기본 프로필 생성
-            profile = {
-                "user_id": user_id,
-                "name": "User",
-                "style_pref": json.dumps(
-                    {
-                        "tone": "친절하고 전문적임",
-                        "language": "한국어",
-                        "detail_level": "필요한 정보 위주",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-            await self._redis.hset(key, mapping=profile)
-
-        profile["style_pref"] = json.loads(profile.get("style_pref", "{}"))
-        return profile
+        default_style = {"tone": "친절하고 전문적임", "language": "한국어", "detail_level": "상세함"}
+        await db.execute(
+            "INSERT INTO users (user_id, name, style_pref) VALUES (?, ?, ?)",
+            (user_id, "User", json.dumps(default_style, ensure_ascii=False))
+        )
+        await db.commit()
+        return {"user_id": user_id, "name": "User", "style_pref": default_style}
 
     async def update_user_profile(self, user_id: str, updates: dict[str, Any]) -> None:
-        key = f"user:{user_id}:profile"
+        db = await self.ensure_db()
         if "style_pref" in updates:
-            updates["style_pref"] = json.dumps(
-                updates["style_pref"], ensure_ascii=False
-            )
-        await self._redis.hset(key, mapping=updates)
+            updates["style_pref"] = json.dumps(updates["style_pref"], ensure_ascii=False)
+        
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+        params = list(updates.values()) + [user_id]
+        await db.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", params)
+        await db.commit()
 
-    # ── 세션 및 메시지 관리 ──────────────────────────────────────────────────
+    # ── 세션 및 메시지 ───────────────────────────────────────────────────────
 
-    async def init_session(
-        self, session_id: str, user_id: str, channel_id: str
-    ) -> None:
+    async def init_session(self, session_id: str, user_id: str, channel_id: str) -> None:
+        await self.get_user_profile(user_id)
+        db = await self.ensure_db()
+        
+        await db.execute(
+            "INSERT OR IGNORE INTO sessions (session_id, user_id, channel_id) VALUES (?, ?, ?)",
+            (session_id, user_id, channel_id)
+        )
+        await db.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?", (session_id,))
+        await db.commit()
+
         key = f"session:{session_id}:state"
-        if not await self._redis.exists(key):
-            now = datetime.now(timezone.utc).isoformat()
-            await self._redis.hset(
-                key,
-                mapping={
-                    "user_id": user_id,
-                    "channel_id": channel_id,
-                    "created_at": now,
-                    "last_active_at": now,
-                    "last_summary": "",
-                },
-            )
-            await self._redis.expire(key, _SESSION_TTL)
-            # 신규 유저 확인 및 프로필 초기화
-            await self.get_user_profile(user_id)
-        else:
-            await self._redis.hset(
-                key, "last_active_at", datetime.now(timezone.utc).isoformat()
-            )
-            await self._redis.expire(key, _SESSION_TTL)
-
-    async def add_message(
-        self,
-        session_id: str,
-        user_id: str,
-        role: str,
-        content: str,
-        provider: str = "system",
-        tokens: int = 0,
-    ) -> None:
-        key = f"session:{session_id}:messages"
-        msg_obj = {
-            "role": role,
-            "content": content,
-            "provider": provider,
-            "tokens": tokens,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        await self._redis.rpush(key, json.dumps(msg_obj, ensure_ascii=False))
-        await self._redis.ltrim(key, -_MAX_MESSAGES, -1)
+        await self._redis.hset(key, mapping={"user_id": user_id, "channel_id": channel_id})
         await self._redis.expire(key, _SESSION_TTL)
 
-        if self._db_enabled and self._db_pool:
-            if self._db_type == "postgresql":
-                await self._db_pool.execute(
-                    "INSERT INTO chat_history (user_id, session_id, role, content, provider, tokens_in) VALUES ($1, $2, $3, $4, $5, $6)",
-                    user_id,
-                    session_id,
-                    role,
-                    content,
-                    provider,
-                    tokens,
-                )
-            elif self._db_type == "mysql":
-                async with self._db_pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            "INSERT INTO chat_history (user_id, session_id, role, content, provider, tokens_in) VALUES (%s, %s, %s, %s, %s, %s)",
-                            (user_id, session_id, role, content, provider, tokens),
-                        )
-            elif self._db_type == "sqlite":
-                await self._db_pool.execute(
-                    "INSERT INTO chat_history (user_id, session_id, role, content, provider, tokens_in) VALUES (?, ?, ?, ?, ?, ?)",
-                    (user_id, session_id, role, content, provider, tokens),
-                )
-                await self._db_pool.commit()
+    async def add_message(self, session_id: str, user_id: str, role: str, content: str, provider: str = "system", tokens: int = 0, thread_id: str | None = None) -> None:
+        db = await self.ensure_db()
+        await db.execute(
+            "INSERT INTO chat_history (user_id, session_id, thread_id, role, content, provider, tokens_in) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, session_id, thread_id, role, content, provider, tokens)
+        )
+        await db.commit()
 
-    async def build_context_for_llm(
-        self, session_id: str, user_id: str, provider: str = "gemini"
-    ) -> list[dict[str, Any]]:
-        messages_raw = await self._redis.lrange(f"session:{session_id}:messages", 0, -1)
-        messages = [json.loads(m) for m in messages_raw]
-        state = await self._redis.hgetall(f"session:{session_id}:state")
-        user_profile = await self.get_user_profile(user_id)
+        # Redis 캐싱
+        key = f"session:{session_id}:messages"
+        msg = {"role": role, "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
+        await self._redis.rpush(key, json.dumps(msg, ensure_ascii=False))
+        await self._redis.ltrim(key, -_MAX_MESSAGES, -1)
 
-        context: list[dict[str, Any]] = []
+    async def build_context_for_llm(self, session_id: str, user_id: str, provider: str = "gemini") -> list[dict[str, Any]]:
+        db = await self.ensure_db()
+        async with db.execute(
+            "SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+            (session_id, _HISTORY_LIMIT)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            history = [dict(r) for r in rows]
+            history.reverse()
 
-        # 1. 사용자 프로필 및 페르소나 주입
-        style = user_profile.get("style_pref", {})
-        persona_msg = f"[사용자 프로필]\n- ID: {user_id}\n- 선호 스타일: {style.get('tone')}\n- 선호 언어: {style.get('language')}"
-
+        profile = await self.get_user_profile(user_id)
+        style = profile.get("style_pref", {})
+        
+        context = []
+        persona = f"[사용자 프로필] ID: {user_id}, 스타일: {style.get('tone')}, 언어: {style.get('language')}"
+        
         if provider == "gemini":
-            context.append({"role": "user", "content": persona_msg})
-            context.append(
-                {
-                    "role": "model",
-                    "content": "이해했습니다. 해당 사용자의 스타일과 맥락에 맞춰 답변하겠습니다.",
-                }
-            )
+            context.append({"role": "user", "content": persona})
+            context.append({"role": "model", "content": "확인했습니다. 이전 맥락을 고려하여 답변하겠습니다."})
         else:
-            context.append({"role": "system", "content": persona_msg})
+            context.append({"role": "system", "content": persona})
 
-        # 2. 요약 주입
-        summary = state.get("last_summary", "")
-        if summary:
-            context.append(
-                {
-                    "role": "user" if provider == "gemini" else "system",
-                    "content": f"[이전 대화 요약]: {summary}",
-                }
-            )
+        for msg in history:
+            role = msg["role"]
             if provider == "gemini":
-                context.append(
-                    {"role": "model", "content": "이전 맥락을 확인했습니다."}
-                )
-
-        # 3. 최근 메시지 주입
-        for msg in messages:
-            role = msg.get("role", "user")
-            if provider == "gemini":
-                role = role.replace("assistant", "model")
-            context.append({"role": role, "content": msg.get("content", "")})
-
+                role = "model" if role in ["assistant", "orchestra", "orchestra_agent"] else "user"
+            context.append({"role": role, "content": msg["content"]})
         return context
 
-    async def close(self) -> None:
-        await self._redis.aclose()
-        if self._db_pool:
-            if self._db_type == "postgresql":
-                await self._db_pool.close()
-            elif self._db_type == "mysql":
-                self._db_pool.close()
-                await self._db_pool.wait_closed()
-            elif self._db_type == "sqlite":
-                await self._db_pool.close()
+    # ── 에이전트 로그 ────────────────────────────────────────────────────────
 
-    async def maybe_summarize(self, session_id: str) -> None:
-        msg_count = await self._redis.llen(f"session:{session_id}:messages")
-        if msg_count <= _SUMMARIZE_THRESHOLD:
-            return
-        half = msg_count // 2
-        old_msgs_raw = await self._redis.lrange(
-            f"session:{session_id}:messages", 0, half - 1
+    async def add_agent_log(self, agent_name: str, action: str, message: str, task_id: str | None = None, session_id: str | None = None, payload: dict[str, Any] | None = None) -> None:
+        db = await self.ensure_db()
+        await db.execute(
+            "INSERT INTO agent_logs (agent_name, task_id, session_id, action, message, payload) VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_name, task_id, session_id, action, message, json.dumps(payload or {}, ensure_ascii=False))
         )
-        old_msgs = [json.loads(m) for m in old_msgs_raw]
+        await db.commit()
 
-        # 요약 로직 생략 (기존과 동일)
-        summary = "대화 요약됨"
-        await self._redis.ltrim(f"session:{session_id}:messages", half, -1)
-        await self._redis.hset(f"session:{session_id}:state", "last_summary", summary)
+    # ── 유틸리티 및 상태 관리 ──────────────────────────────────────────────────
 
     async def update_task_state(self, task_id: str, fields: dict[str, Any]) -> None:
         key = f"task:{task_id}:state"
         fields["updated_at"] = datetime.now(timezone.utc).isoformat()
-        serialized = {
-            k: (
-                json.dumps(v, ensure_ascii=False)
-                if isinstance(v, (dict, list))
-                else str(v)
-            )
-            for k, v in fields.items()
-        }
+        serialized = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)) for k, v in fields.items()}
         await self._redis.hset(key, mapping=serialized)
         await self._redis.expire(key, _TASK_TTL)
 
@@ -316,30 +171,152 @@ class StateManager:
         return await self._redis.hgetall(f"task:{task_id}:state")
 
     async def get_session_context_summary(self, session_id: str) -> dict[str, Any]:
-        """
-        세션의 컨텍스트 요약을 반환합니다.
-        NLU 분석 시 style_guide로 활용됩니다.
-
-        Returns:
-            {
-                "style": {tone, language, detail_level},  # 사용자 스타일 설정
-                "last_summary": str,                      # 이전 대화 요약
-            }
-        """
         state = await self._redis.hgetall(f"session:{session_id}:state")
         user_id = state.get("user_id", "")
-
-        style: dict[str, str] = {}
+        style = {}
         if user_id:
-            try:
-                profile = await self.get_user_profile(user_id)
-                style_pref = profile.get("style_pref", {})
-                if isinstance(style_pref, dict):
-                    style = style_pref
-            except Exception:
-                pass
+            profile = await self.get_user_profile(user_id)
+            style = profile.get("style_pref", {})
+        
+        async with (await self.ensure_db()).execute("SELECT last_summary FROM sessions WHERE session_id = ?", (session_id,)) as cursor:
+            row = await cursor.fetchone()
+            last_summary = row["last_summary"] if row else ""
 
-        return {
-            "style": style,
-            "last_summary": state.get("last_summary", ""),
-        }
+        return {"style": style, "last_summary": last_summary}
+
+    async def maybe_summarize(self, session_id: str) -> None:
+        # 요약 로직은 향후 LLM 연동 시 구체화 (현재는 placeholder)
+        pass
+
+    # ── Admin API 지원 조회 메서드 ──────────────────────────────────────────────
+
+    async def get_agent_logs(
+        self,
+        agent_name: str | None = None,
+        action: str | None = None,
+        task_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """에이전트 활동 로그를 필터링·페이지네이션하여 반환합니다."""
+        db = await self.ensure_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if agent_name:
+            conditions.append("agent_name = ?")
+            params.append(agent_name)
+        if action:
+            conditions.append("action = ?")
+            params.append(action)
+        if task_id:
+            conditions.append("task_id = ?")
+            params.append(task_id)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT * FROM agent_logs {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        params += [limit, offset]
+
+        async with db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def count_agent_logs(
+        self,
+        agent_name: str | None = None,
+        action: str | None = None,
+        task_id: str | None = None,
+    ) -> int:
+        """로그 총 건수 반환 (페이지네이션 total 계산용)."""
+        db = await self.ensure_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if agent_name:
+            conditions.append("agent_name = ?")
+            params.append(agent_name)
+        if action:
+            conditions.append("action = ?")
+            params.append(action)
+        if task_id:
+            conditions.append("task_id = ?")
+            params.append(task_id)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        async with db.execute(f"SELECT COUNT(*) FROM agent_logs {where}", params) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def list_sessions(
+        self, limit: int = 20, offset: int = 0
+    ) -> tuple[list[dict[str, Any]], int]:
+        """세션 목록과 전체 건수를 함께 반환합니다."""
+        db = await self.ensure_db()
+        async with db.execute(
+            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        async with db.execute("SELECT COUNT(*) FROM sessions") as cursor:
+            total_row = await cursor.fetchone()
+        total = total_row[0] if total_row else 0
+
+        return [dict(r) for r in rows], total
+
+    async def delete_session(self, session_id: str) -> None:
+        """세션과 관련된 대화 이력을 SQLite와 Redis에서 모두 삭제합니다."""
+        db = await self.ensure_db()
+        await db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        await db.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+        await db.commit()
+        await self._redis.delete(f"session:{session_id}:state")
+        await self._redis.delete(f"session:{session_id}:messages")
+
+    async def get_session_history(
+        self, session_id: str, limit: int = 30, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """특정 세션의 대화 이력을 최신순으로 반환합니다."""
+        db = await self.ensure_db()
+        async with db.execute(
+            "SELECT role, content, provider, created_at FROM chat_history "
+            "WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (session_id, limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        # 최신순 조회 후 시간순으로 뒤집어 반환
+        return list(reversed([dict(r) for r in rows]))
+
+    async def list_users(
+        self, limit: int = 20, offset: int = 0
+    ) -> tuple[list[dict[str, Any]], int]:
+        """사용자 목록과 전체 건수를 함께 반환합니다."""
+        db = await self.ensure_db()
+        async with db.execute(
+            "SELECT user_id, name, created_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            total_row = await cursor.fetchone()
+        total = total_row[0] if total_row else 0
+
+        return [dict(r) for r in rows], total
+
+    async def scan_task_ids(self, limit: int = 50) -> list[str]:
+        """
+        Redis에서 task:*:state 키를 스캔하여 task_id 목록을 반환합니다.
+        최대 limit 개까지 반환하며, 생성 시각 역순 정렬은 보장되지 않습니다.
+        """
+        keys: list[str] = []
+        async for key in self._redis.scan_iter("task:*:state", count=100):
+            keys.append(key)
+            if len(keys) >= limit:
+                break
+        # "task:{id}:state" → "{id}"
+        return [k.split(":")[1] for k in keys]
+
+    async def close(self) -> None:
+        if self._redis:
+            await self._redis.aclose()
+        if self._db_conn:
+            await self._db_conn.close()

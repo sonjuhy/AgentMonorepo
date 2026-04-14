@@ -1,0 +1,748 @@
+"""
+Orchestra Agent 관리자 API 라우터  (GUI 외부 제어 전용)
+
+접두사: /admin
+
+엔드포인트 목록:
+  [대시보드]
+  GET  /admin/dashboard                    전체 시스템 현황 (에이전트·큐·로그 요약)
+
+  [에이전트 관리]
+  GET  /admin/agents                       전체 에이전트 목록 + 상세 상태
+  GET  /admin/agents/{name}                특정 에이전트 상세 (헬스·큐·서킷브레이커)
+  POST /admin/agents                       에이전트 수동 등록
+  DELETE /admin/agents/{name}              에이전트 등록 해제 (큐 정리 옵션)
+  POST /admin/agents/{name}/maintenance    유지보수 모드 전환·복구
+
+  [권한 관리]
+  GET  /admin/permissions/presets          사용 가능한 권한 프리셋 목록
+  GET  /admin/agents/{name}/permissions    특정 에이전트 권한 조회
+  PUT  /admin/agents/{name}/permissions    권한 프리셋 변경
+
+  [서킷브레이커]
+  GET  /admin/agents/{name}/circuit        서킷브레이커 상태 조회
+  POST /admin/agents/{name}/circuit/reset  서킷브레이커 수동 초기화
+  POST /admin/agents/{name}/circuit/trip   서킷브레이커 수동 차단 (긴급)
+
+  [큐 관리]
+  GET  /admin/queues                       전체 큐 현황
+  GET  /admin/queues/{name}                특정 에이전트 큐 상세 + 미리보기
+  DELETE /admin/queues/{name}              큐 강제 비우기
+
+  [태스크 관리]
+  GET  /admin/tasks                        최근 태스크 목록 (페이지네이션)
+  GET  /admin/tasks/{task_id}              태스크 상세 조회
+
+  [로그 조회]
+  GET  /admin/logs                         에이전트 활동 로그 (필터·페이지네이션)
+
+  [세션 관리]
+  GET  /admin/sessions                     세션 목록
+  GET  /admin/sessions/{session_id}        세션 상세 + 대화 이력
+  DELETE /admin/sessions/{session_id}      세션 삭제
+
+  [사용자 관리]
+  GET  /admin/users                        사용자 목록
+  GET  /admin/users/{user_id}              사용자 프로필
+  PUT  /admin/users/{user_id}              프로필 수정
+
+  [시스템]
+  GET  /admin/system/metrics               시스템 전체 메트릭
+  POST /admin/system/broadcast             전체/특정 에이전트 브로드캐스트
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field
+
+from .app_context import ctx
+
+router = APIRouter(prefix="/admin", tags=["관리자 (Admin)"])
+
+# ── 권한 프리셋 정의 ───────────────────────────────────────────────────────────
+# AGENT_CONTAINER_MANAGEMENT.md §4 권한 부여 기반
+
+PERMISSION_PRESETS: dict[str, dict[str, Any]] = {
+    "minimal": {
+        "network": "none",
+        "filesystem": "readonly",
+        "memory_limit": "256m",
+        "cpu_limit": "0.5",
+        "pids_limit": 50,
+        "cap_drop": "ALL",
+        "description": "단순 계산, 격리된 코드 실행 (네트워크 차단)",
+    },
+    "standard": {
+        "network": "internal",
+        "filesystem": "readonly",
+        "memory_limit": "512m",
+        "cpu_limit": "1.0",
+        "pids_limit": 100,
+        "cap_drop": "ALL",
+        "description": "일반 에이전트 간 통신 — 기본값 (내부 네트워크만 허용)",
+    },
+    "trusted": {
+        "network": "full",
+        "filesystem": "readwrite",
+        "memory_limit": "1g",
+        "cpu_limit": "2.0",
+        "pids_limit": 200,
+        "cap_drop": "ALL",
+        "cap_add": ["NET_BIND_SERVICE"],
+        "description": "외부 API 호출, 로컬 파일 수정 (전체 네트워크 허용)",
+    },
+}
+
+_CB_THRESHOLD = 3  # health_monitor와 동일 값
+
+
+# ── Request 모델 ──────────────────────────────────────────────────────────────
+
+class RegisterAgentBody(BaseModel):
+    agent_name: str = Field(..., description="에이전트 고유 이름 (예: my_agent)")
+    capabilities: list[str] = Field(default_factory=list, description="에이전트 액션 목록")
+    lifecycle_type: str = Field("long_running", description="long_running | ephemeral")
+    nlu_description: str = Field("", description="NLU 시스템 프롬프트용 자연어 설명")
+    permission_preset: str = Field("standard", description="minimal | standard | trusted")
+
+
+class SetPermissionsBody(BaseModel):
+    preset: str = Field(..., description="minimal | standard | trusted")
+
+
+class UpdateUserBody(BaseModel):
+    name: str | None = None
+    style_pref: dict[str, str] | None = None
+
+
+class BroadcastBody(BaseModel):
+    message: str = Field(..., description="브로드캐스트할 메시지 내용")
+    target_agents: list[str] = Field(
+        default_factory=list,
+        description="대상 에이전트 목록. 비어있으면 전체 에이전트에 전송",
+    )
+
+
+# ── 헬퍼 ──────────────────────────────────────────────────────────────────────
+
+async def _require_agent(agent_name: str) -> dict[str, Any]:
+    """레지스트리에서 에이전트를 찾거나 404 반환."""
+    raw = await ctx.redis_client.hget("agents:registry", agent_name)
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"에이전트 '{agent_name}'이 레지스트리에 없습니다.",
+        )
+    return json.loads(raw)
+
+
+async def _circuit_info(agent_name: str) -> dict[str, Any]:
+    failures = int(await ctx.redis_client.get(f"circuit:{agent_name}:failures") or 0)
+    return {
+        "failures": failures,
+        "threshold": _CB_THRESHOLD,
+        "is_open": failures >= _CB_THRESHOLD,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 대시보드
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/dashboard", summary="시스템 전체 현황 대시보드")
+async def get_dashboard() -> dict[str, Any]:
+    """
+    GUI 홈 화면용 단일 응답:
+    에이전트 상태 요약, 큐 현황, 최근 로그 10건, 서킷브레이커 이상 에이전트 목록.
+    """
+    system_health = await ctx.health_monitor.get_system_health()
+    available = await ctx.health_monitor.get_available_agents()
+    queues = await ctx.health_monitor.get_all_queues_status()
+    recent_logs = await ctx.state_manager.get_agent_logs(limit=10, offset=0)
+
+    # 서킷브레이커가 열린 에이전트
+    open_circuits = [
+        name for name, info in system_health.items()
+        if info.get("circuit_breaker_open")
+    ]
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "agents_total": len(system_health),
+            "agents_online": len(available),
+            "agents_offline": len(system_health) - len(available),
+            "total_queued_tasks": sum(q["length"] for q in queues.values()),
+            "open_circuit_count": len(open_circuits),
+        },
+        "agents": system_health,
+        "open_circuits": open_circuits,
+        "queues": queues,
+        "recent_logs": recent_logs,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 에이전트 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/agents", summary="전체 에이전트 목록 상세 조회")
+async def list_all_agents() -> dict[str, Any]:
+    """
+    레지스트리에 등록된 모든 에이전트의 헬스, 큐 길이, 서킷브레이커 상태를 한 번에 반환합니다.
+    """
+    registry = await ctx.redis_client.hgetall("agents:registry")
+    result: dict[str, Any] = {}
+
+    for name, raw in registry.items():
+        data = json.loads(raw)
+        health = await ctx.redis_client.hgetall(f"agent:{name}:health")
+        queue_len = await ctx.redis_client.llen(f"agent:{name}:tasks")
+        cb = await _circuit_info(name)
+        result[name] = {
+            "lifecycle_type": data.get("lifecycle_type", "long_running"),
+            "capabilities": data.get("capabilities", []),
+            "permission_preset": data.get("permission_preset", "standard"),
+            "registered_at": data.get("registered_at"),
+            "health": {
+                "status": health.get("status", "UNKNOWN"),
+                "last_heartbeat": health.get("last_heartbeat"),
+                "version": health.get("version"),
+                "current_tasks": health.get("current_tasks", "0"),
+                "max_concurrency": health.get("max_concurrency", "1"),
+            },
+            "queue_length": queue_len,
+            "circuit_breaker": cb,
+        }
+
+    return {"total": len(result), "agents": result}
+
+
+@router.get("/agents/{agent_name}", summary="특정 에이전트 상세 조회")
+async def get_agent_detail(
+    agent_name: str,
+    queue_preview: int = Query(5, ge=1, le=50, description="큐 미리보기 메시지 수"),
+) -> dict[str, Any]:
+    """
+    헬스, 큐, 서킷브레이커, 큐 메시지 미리보기까지 한 번에 반환.
+    """
+    data = await _require_agent(agent_name)
+    health = await ctx.redis_client.hgetall(f"agent:{agent_name}:health")
+    cb = await _circuit_info(agent_name)
+    queue_key = f"agent:{agent_name}:tasks"
+    queue_len = await ctx.redis_client.llen(queue_key)
+
+    raw_items = await ctx.redis_client.lrange(queue_key, 0, queue_preview - 1)
+    previews: list[dict[str, Any]] = []
+    for item in raw_items:
+        try:
+            msg = json.loads(item)
+            previews.append({
+                "task_id": msg.get("task_id"),
+                "action": msg.get("action"),
+                "priority": msg.get("priority"),
+                "timestamp": msg.get("timestamp"),
+                "content_preview": str(msg.get("content", ""))[:120],
+            })
+        except Exception:
+            previews.append({"raw_preview": item[:200]})
+
+    available = await ctx.health_monitor.get_available_agents()
+
+    return {
+        "agent_name": agent_name,
+        "is_available": agent_name in available,
+        "registry": {
+            "lifecycle_type": data.get("lifecycle_type"),
+            "capabilities": data.get("capabilities", []),
+            "permission_preset": data.get("permission_preset", "standard"),
+            "nlu_description": data.get("nlu_description", ""),
+            "registered_at": data.get("registered_at"),
+        },
+        "health": health,
+        "circuit_breaker": cb,
+        "queue": {
+            "total_length": queue_len,
+            "preview": previews,
+        },
+    }
+
+
+@router.post("/agents", status_code=status.HTTP_201_CREATED, summary="에이전트 수동 등록")
+async def register_agent(body: RegisterAgentBody) -> dict[str, Any]:
+    """
+    새 에이전트를 레지스트리에 등록합니다.
+    에이전트 자동 자기 등록이 불가능한 경우 관리자가 직접 수행합니다.
+    """
+    if body.lifecycle_type not in ("long_running", "ephemeral"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="lifecycle_type은 'long_running' 또는 'ephemeral'이어야 합니다.",
+        )
+    if body.permission_preset not in PERMISSION_PRESETS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"유효하지 않은 권한 프리셋: '{body.permission_preset}'. "
+                   f"가능한 값: {list(PERMISSION_PRESETS.keys())}",
+        )
+
+    await ctx.health_monitor.register_agent(
+        body.agent_name,
+        body.capabilities,
+        lifecycle_type=body.lifecycle_type,
+        nlu_description=body.nlu_description,
+    )
+
+    # 권한 프리셋을 레지스트리 데이터에 추가
+    raw = await ctx.redis_client.hget("agents:registry", body.agent_name)
+    if raw:
+        reg_data = json.loads(raw)
+        reg_data["permission_preset"] = body.permission_preset
+        await ctx.redis_client.hset(
+            "agents:registry", body.agent_name,
+            json.dumps(reg_data, ensure_ascii=False),
+        )
+
+    return {
+        "status": "registered",
+        "agent_name": body.agent_name,
+        "lifecycle_type": body.lifecycle_type,
+        "permission_preset": body.permission_preset,
+        "permissions": PERMISSION_PRESETS[body.permission_preset],
+    }
+
+
+@router.delete("/agents/{agent_name}", summary="에이전트 등록 해제")
+async def deregister_agent(
+    agent_name: str,
+    flush_queue: bool = Query(True, description="큐 메시지도 함께 삭제할지 여부"),
+) -> dict[str, Any]:
+    """
+    에이전트를 레지스트리에서 제거하고 관련 Redis 데이터를 정리합니다.
+    flush_queue=true 이면 대기 중인 태스크도 모두 삭제됩니다.
+    """
+    await _require_agent(agent_name)
+
+    await ctx.redis_client.hdel("agents:registry", agent_name)
+    await ctx.redis_client.delete(f"agent:{agent_name}:health")
+    await ctx.redis_client.delete(f"circuit:{agent_name}:failures")
+
+    flushed = 0
+    if flush_queue:
+        queue_key = f"agent:{agent_name}:tasks"
+        flushed = await ctx.redis_client.llen(queue_key)
+        await ctx.redis_client.delete(queue_key)
+
+    return {
+        "status": "deregistered",
+        "agent_name": agent_name,
+        "queue_flushed": flush_queue,
+        "flushed_tasks": flushed,
+    }
+
+
+@router.post("/agents/{agent_name}/maintenance", summary="유지보수 모드 전환·복구")
+async def toggle_maintenance(
+    agent_name: str,
+    enable: bool = Query(..., description="true=유지보수 ON, false=정상 복구"),
+) -> dict[str, Any]:
+    """
+    에이전트를 유지보수 모드로 전환하거나 복구합니다.
+    복구 시 서킷브레이커도 함께 초기화됩니다.
+    """
+    await _require_agent(agent_name)
+
+    new_status = "MAINTENANCE" if enable else "IDLE"
+    await ctx.redis_client.hset(f"agent:{agent_name}:health", "status", new_status)
+
+    if not enable:
+        await ctx.health_monitor.reset_circuit_breaker(agent_name)
+
+    return {
+        "agent_name": agent_name,
+        "maintenance_enabled": enable,
+        "current_status": new_status,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 권한 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/permissions/presets", summary="권한 프리셋 목록")
+async def list_permission_presets() -> dict[str, Any]:
+    """minimal / standard / trusted 권한 프리셋 정의 전체 반환."""
+    return {"presets": PERMISSION_PRESETS}
+
+
+@router.get("/agents/{agent_name}/permissions", summary="에이전트 권한 조회")
+async def get_agent_permissions(agent_name: str) -> dict[str, Any]:
+    data = await _require_agent(agent_name)
+    preset_name = data.get("permission_preset", "standard")
+    return {
+        "agent_name": agent_name,
+        "preset": preset_name,
+        "permissions": PERMISSION_PRESETS.get(preset_name, PERMISSION_PRESETS["standard"]),
+        "available_presets": list(PERMISSION_PRESETS.keys()),
+    }
+
+
+@router.put("/agents/{agent_name}/permissions", summary="에이전트 권한 프리셋 변경")
+async def set_agent_permissions(
+    agent_name: str, body: SetPermissionsBody
+) -> dict[str, Any]:
+    """
+    권한 프리셋을 변경합니다.
+    실제 Docker 컨테이너 권한은 재시작 시 적용됩니다.
+    """
+    if body.preset not in PERMISSION_PRESETS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"유효하지 않은 프리셋: '{body.preset}'. "
+                   f"가능한 값: {list(PERMISSION_PRESETS.keys())}",
+        )
+
+    data = await _require_agent(agent_name)
+    data["permission_preset"] = body.preset
+    await ctx.redis_client.hset(
+        "agents:registry", agent_name,
+        json.dumps(data, ensure_ascii=False),
+    )
+
+    return {
+        "agent_name": agent_name,
+        "preset": body.preset,
+        "permissions": PERMISSION_PRESETS[body.preset],
+        "note": "컨테이너 재시작 후 실제 Docker 권한에 반영됩니다.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 서킷브레이커 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/agents/{agent_name}/circuit", summary="서킷브레이커 상태 조회")
+async def get_circuit_breaker(agent_name: str) -> dict[str, Any]:
+    await _require_agent(agent_name)
+    health = await ctx.redis_client.hgetall(f"agent:{agent_name}:health")
+    cb = await _circuit_info(agent_name)
+    return {
+        "agent_name": agent_name,
+        "agent_status": health.get("status", "UNKNOWN"),
+        **cb,
+    }
+
+
+@router.post("/agents/{agent_name}/circuit/reset", summary="서킷브레이커 초기화")
+async def reset_circuit_breaker(agent_name: str) -> dict[str, Any]:
+    """실패 카운터를 0으로 리셋하고 에이전트 상태를 IDLE로 복구합니다."""
+    await _require_agent(agent_name)
+    await ctx.health_monitor.reset_circuit_breaker(agent_name)
+    return {
+        "agent_name": agent_name,
+        "status": "reset",
+        "message": "서킷브레이커가 초기화되고 에이전트가 IDLE 상태로 복구되었습니다.",
+    }
+
+
+@router.post("/agents/{agent_name}/circuit/trip", summary="서킷브레이커 수동 차단")
+async def trip_circuit_breaker(agent_name: str) -> dict[str, Any]:
+    """긴급 상황 시 에이전트를 즉시 차단합니다. /circuit/reset으로 복구 가능."""
+    await _require_agent(agent_name)
+    await ctx.redis_client.set(
+        f"circuit:{agent_name}:failures", _CB_THRESHOLD, ex=300
+    )
+    await ctx.redis_client.hset(f"agent:{agent_name}:health", "status", "MAINTENANCE")
+    return {
+        "agent_name": agent_name,
+        "status": "tripped",
+        "message": "서킷브레이커가 수동으로 차단되었습니다. POST /circuit/reset 으로 복구하세요.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 큐 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/queues", summary="전체 큐 현황")
+async def list_queues() -> dict[str, Any]:
+    """등록된 모든 에이전트의 큐 길이를 한눈에 조회합니다."""
+    return await ctx.health_monitor.get_all_queues_status()
+
+
+@router.get("/queues/{agent_name}", summary="특정 에이전트 큐 상세")
+async def get_queue_detail(
+    agent_name: str,
+    peek: int = Query(10, ge=1, le=100, description="미리볼 메시지 수"),
+) -> dict[str, Any]:
+    queue_key = f"agent:{agent_name}:tasks"
+    length = await ctx.redis_client.llen(queue_key)
+    raw_items = await ctx.redis_client.lrange(queue_key, 0, peek - 1)
+
+    items: list[dict[str, Any]] = []
+    for item in raw_items:
+        try:
+            msg = json.loads(item)
+            items.append({
+                "task_id": msg.get("task_id"),
+                "action": msg.get("action"),
+                "priority": msg.get("priority"),
+                "timestamp": msg.get("timestamp"),
+                "content_preview": str(msg.get("content", ""))[:120],
+            })
+        except Exception:
+            items.append({"raw_preview": item[:200]})
+
+    return {
+        "agent_name": agent_name,
+        "queue_key": queue_key,
+        "total_length": length,
+        "preview_count": len(items),
+        "preview": items,
+    }
+
+
+@router.delete("/queues/{agent_name}", summary="큐 강제 비우기")
+async def flush_queue(agent_name: str) -> dict[str, Any]:
+    """
+    에이전트 큐를 강제로 삭제합니다.
+    주의: 아직 처리되지 않은 태스크가 영구적으로 손실됩니다.
+    """
+    queue_key = f"agent:{agent_name}:tasks"
+    count = await ctx.redis_client.llen(queue_key)
+    await ctx.redis_client.delete(queue_key)
+    return {
+        "agent_name": agent_name,
+        "flushed_count": count,
+        "message": f"큐에서 {count}개의 태스크가 삭제되었습니다.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 태스크 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/tasks", summary="태스크 목록 조회")
+async def list_tasks(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Redis에 캐싱된 태스크 상태를 최신순으로 조회합니다."""
+    task_ids = await ctx.state_manager.scan_task_ids(limit=limit + offset)
+    page_ids = task_ids[offset: offset + limit]
+
+    tasks: list[dict[str, Any]] = []
+    for tid in page_ids:
+        state = await ctx.state_manager.get_task_state(tid)
+        tasks.append({"task_id": tid, **state})
+
+    return {
+        "total_scanned": len(task_ids),
+        "limit": limit,
+        "offset": offset,
+        "tasks": tasks,
+    }
+
+
+@router.get("/tasks/{task_id}", summary="태스크 상세 조회")
+async def get_task_detail(task_id: str) -> dict[str, Any]:
+    state = await ctx.state_manager.get_task_state(task_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"태스크 '{task_id}'를 찾을 수 없습니다.",
+        )
+    return {"task_id": task_id, **state}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 로그 조회
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/logs", summary="에이전트 활동 로그 조회")
+async def get_logs(
+    agent_name: str | None = Query(None, description="필터: 에이전트 이름"),
+    action: str | None = Query(None, description="필터: 액션 종류 (error, reasoning 등)"),
+    task_id: str | None = Query(None, description="필터: 태스크 ID"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """SQLite에 저장된 에이전트 활동 로그를 필터링·페이지네이션하여 반환합니다."""
+    logs = await ctx.state_manager.get_agent_logs(
+        agent_name=agent_name,
+        action=action,
+        task_id=task_id,
+        limit=limit,
+        offset=offset,
+    )
+    total = await ctx.state_manager.count_agent_logs(
+        agent_name=agent_name, action=action, task_id=task_id
+    )
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "logs": logs,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 세션 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/sessions", summary="세션 목록 조회")
+async def list_sessions(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    sessions, total = await ctx.state_manager.list_sessions(limit=limit, offset=offset)
+    return {"total": total, "limit": limit, "offset": offset, "sessions": sessions}
+
+
+@router.get("/sessions/{session_id}", summary="세션 상세 + 대화 이력")
+async def get_session_detail(
+    session_id: str,
+    history_limit: int = Query(30, ge=1, le=200, description="가져올 메시지 수"),
+    history_offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    state = await ctx.redis_client.hgetall(f"session:{session_id}:state")
+    history = await ctx.state_manager.get_session_history(
+        session_id, limit=history_limit, offset=history_offset
+    )
+    if not state and not history:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"세션 '{session_id}'을 찾을 수 없습니다.",
+        )
+    return {
+        "session_id": session_id,
+        "state": state,
+        "history_count": len(history),
+        "history": history,
+    }
+
+
+@router.delete("/sessions/{session_id}", summary="세션 삭제")
+async def delete_session(session_id: str) -> dict[str, Any]:
+    """Redis 캐시와 SQLite의 세션 데이터를 모두 삭제합니다."""
+    await ctx.state_manager.delete_session(session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 사용자 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/users", summary="사용자 목록")
+async def list_users(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    users, total = await ctx.state_manager.list_users(limit=limit, offset=offset)
+    return {"total": total, "limit": limit, "offset": offset, "users": users}
+
+
+@router.get("/users/{user_id}", summary="사용자 프로필 조회")
+async def get_user(user_id: str) -> dict[str, Any]:
+    return await ctx.state_manager.get_user_profile(user_id)
+
+
+@router.put("/users/{user_id}", summary="사용자 프로필 수정")
+async def update_user(user_id: str, body: UpdateUserBody) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if body.name is not None:
+        updates["name"] = body.name
+    if body.style_pref is not None:
+        updates["style_pref"] = body.style_pref
+    if not updates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="수정할 필드(name, style_pref)가 없습니다.",
+        )
+    await ctx.state_manager.update_user_profile(user_id, updates)
+    return await ctx.state_manager.get_user_profile(user_id)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 시스템
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/system/metrics", summary="시스템 전체 메트릭")
+async def get_system_metrics() -> dict[str, Any]:
+    """Redis 메모리, 에이전트 현황, 큐 합계, 로그 건수 등 운영 메트릭을 반환합니다."""
+    redis_mem = await ctx.redis_client.info("memory")
+    redis_clients = await ctx.redis_client.info("clients")
+
+    queues = await ctx.health_monitor.get_all_queues_status()
+    available = await ctx.health_monitor.get_available_agents()
+    registry = await ctx.redis_client.hgetall("agents:registry")
+
+    open_circuits: list[str] = []
+    for name in registry:
+        failures = int(await ctx.redis_client.get(f"circuit:{name}:failures") or 0)
+        if failures >= _CB_THRESHOLD:
+            open_circuits.append(name)
+
+    log_count = await ctx.state_manager.count_agent_logs()
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "redis": {
+            "used_memory_human": redis_mem.get("used_memory_human", "N/A"),
+            "peak_memory_human": redis_mem.get("used_memory_peak_human", "N/A"),
+            "connected_clients": redis_clients.get("connected_clients", 0),
+        },
+        "agents": {
+            "total_registered": len(registry),
+            "available": len(available),
+            "unavailable": len(registry) - len(available),
+            "open_circuit_breakers": open_circuits,
+        },
+        "queues": {
+            "total_queued": sum(q["length"] for q in queues.values()),
+            "per_agent": queues,
+        },
+        "logs": {
+            "total_stored": log_count,
+        },
+    }
+
+
+@router.post("/system/broadcast", summary="에이전트 브로드캐스트")
+async def broadcast_message(body: BroadcastBody) -> dict[str, Any]:
+    """
+    메시지를 지정한 에이전트(또는 전체)에 브로드캐스트합니다.
+    에이전트 설정 갱신 알림이나 긴급 지시에 사용합니다.
+    """
+    if body.target_agents:
+        targets = body.target_agents
+    else:
+        registry = await ctx.redis_client.hgetall("agents:registry")
+        targets = list(registry.keys())
+
+    pushed: list[str] = []
+    for agent_name in targets:
+        msg = {
+            "task_id": str(uuid.uuid4()),
+            "action": "broadcast",
+            "content": body.message,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await ctx.redis_client.rpush(
+            f"agent:{agent_name}:tasks",
+            json.dumps(msg, ensure_ascii=False),
+        )
+        pushed.append(agent_name)
+
+    return {
+        "status": "sent",
+        "target_count": len(pushed),
+        "targets": pushed,
+        "message_preview": body.message[:100],
+    }
