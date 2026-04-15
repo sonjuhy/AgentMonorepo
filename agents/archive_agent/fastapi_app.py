@@ -18,14 +18,13 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(encoding="utf-8", override=True)
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 
-from .notion.agent import ArchiveAgent
-from .notion.task_analyzer import build_task_analyzer
+from .unified_agent import UnifiedArchiveAgent
 from .redis_listener import ArchiveRedisListener
 
 logging.basicConfig(
@@ -37,8 +36,10 @@ logger = logging.getLogger("archive_agent.fastapi_app")
 
 # ── Pydantic 요청 바디 ─────────────────────────────────────────────────────────
 
+
 class ExecuteRequest(BaseModel):
     """POST /execute 요청 바디 — DispatchMessage.params 구조와 동일."""
+
     source: str = "direct"
     page_id: str | None = None
     file_path: str | None = None
@@ -51,8 +52,9 @@ class ExecuteRequest(BaseModel):
 
 # ── Application Context ────────────────────────────────────────────────────────
 
+
 class _AppContext:
-    agent: ArchiveAgent
+    agent: UnifiedArchiveAgent
     listener: ArchiveRedisListener
     listen_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
@@ -63,12 +65,13 @@ _ctx = _AppContext()
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI 수명 주기: 초기화 → 백그라운드 시작 → 종료."""
-    logger.info("[Lifespan] Archive Agent 서버 시작")
+    logger.info("[Lifespan] Archive Agent 서버 시작 (Unified Mode)")
 
-    _ctx.agent = ArchiveAgent(task_analyzer=build_task_analyzer())
+    _ctx.agent = UnifiedArchiveAgent()
     _ctx.listener = ArchiveRedisListener(
         archive_agent=_ctx.agent,
         redis_url=os.environ.get("REDIS_URL"),
@@ -113,12 +116,11 @@ app = FastAPI(
 
 # ── 엔드포인트 ──────────────────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     """에이전트 상태와 백그라운드 태스크 실행 여부를 반환합니다."""
-    listen_running = (
-        _ctx.listen_task is not None and not _ctx.listen_task.done()
-    )
+    listen_running = _ctx.listen_task is not None and not _ctx.listen_task.done()
     heartbeat_running = (
         _ctx.heartbeat_task is not None and not _ctx.heartbeat_task.done()
     )

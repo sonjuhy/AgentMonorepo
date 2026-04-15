@@ -16,7 +16,7 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(encoding="utf-8", override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +50,9 @@ def _run_server() -> None:
 
 
 def main() -> None:
+    vault_path: str | None = os.getenv("OBSIDIAN_VAULT_PATH")
+    logger.info(f"로드된 경로: {vault_path}")  # 여기서 깨져서 나오는지 확인 필수
+
     mode = os.environ.get("NOTION_MODE", "ephemeral").lower()
     if mode == "server":
         _run_server()

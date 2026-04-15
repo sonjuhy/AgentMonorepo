@@ -81,7 +81,7 @@ class ArchiveRedisListenerProtocol(Protocol):
     async def _report_result(
         self,
         task_id: str,
-        result_data: PlanningTaskResult,
+        result_data: ArchiveTaskResult,
         status: str,
         error: dict[str, Any] | None,
     ) -> None:

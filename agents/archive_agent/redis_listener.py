@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 import redis.asyncio as aioredis
 
-from .notion.agent import ArchiveAgent
+from .unified_agent import UnifiedArchiveAgent
 
 logger = logging.getLogger("archive_agent.redis_listener")
 
@@ -30,25 +30,26 @@ _BLPOP_TIMEOUT = 5                # 초 (5초마다 CancelledError 체크)
 
 class ArchiveRedisListener:
     """
-    OrchestraManager ↔ ArchiveAgent 연결 브리지.
+    OrchestraManager ↔ UnifiedArchiveAgent 연결 브리지.
 
     - BLPOP으로 agent:archive_agent:tasks 큐 감시
-    - ArchiveAgent.handle_dispatch() 위임
+    - UnifiedArchiveAgent에게 위임 (스스로 Notion/Obsidian 판단)
     - HTTP POST {orchestra_url}/results 결과 보고
     - 15초 주기 heartbeat (agent:archive_agent:health)
     """
 
     def __init__(
         self,
-        archive_agent: ArchiveAgent,
+        archive_agent: UnifiedArchiveAgent | None = None,
         redis_url: str | None = None,
         orchestra_url: str | None = None,
     ) -> None:
-        self._agent = archive_agent
+        self._agent = archive_agent or UnifiedArchiveAgent()
+        
         _url = redis_url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
         self._redis_url = _url.replace("localhost", "127.0.0.1")
         self._orchestra_url = orchestra_url or os.environ.get(
-            "ORCHESTRA_URL", "http://orchestra-agent:8001"
+            "ORCHESTRA_URL", "http://127.0.0.1:8001"
         )
         self._redis: aioredis.Redis | None = None
         self._current_task_count: int = 0
@@ -224,6 +225,24 @@ class ArchiveRedisListener:
         except asyncio.CancelledError:
             logger.info("[ArchiveRedisListener] heartbeat 정상 종료")
 
+    # NLU가 이 에이전트를 이해하는 데 사용하는 설명입니다.
+    # 새 action 추가 시 이 문자열만 업데이트하면 오케스트라는 자동으로 인식합니다.
+    _NLU_DESCRIPTION = (
+        "- archive_agent: Notion/Obsidian 자료 조회 및 저장 (Archive Hub)\n"
+        "  - actions:\n"
+        "    - list_databases: 연결된 모든 노션 데이터베이스 목록 조회\n"
+        "    - get_database_schema: 특정 데이터베이스의 컬럼 구조 및 타입 파악 (params: database_id)\n"
+        "    - query_database: 데이터베이스 항목 목록 조회 (params: database_id[선택])\n"
+        "    - get_page: 특정 페이지 상세 내용 조회 (params: page_id[필수])\n"
+        "    - create_page: 노션에 새 페이지 생성 또는 저장 (params: title[필수], database_id[선택], content[선택])"
+        " - \"저장해줘\", \"기록해줘\", \"노션에 써줘\" 요청에 사용\n"
+        "    - search: 노션/옵시디언 전체 검색 (params: query)\n"
+        "    - read_file: 옵시디언 파일 내용 읽기 (params: page_id)\n"
+        "    - write_file: 옵시디언 파일 생성/수정 (params: title[필수], content[선택])\n"
+        "    - append_file: 옵시디언 파일에 내용 추가 (params: title[필수], content[필수])\n"
+        "    - list_files: 옵시디언 볼트 파일 목록 검색 (params: query[선택])"
+    )
+
     async def _update_health(self, status: str) -> None:
         """agent:archive_agent:health Hash 필드를 업데이트합니다."""
         try:
@@ -236,6 +255,7 @@ class ArchiveRedisListener:
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "version": "2.0.0",
                     "capabilities": "archive_notion,archive_obsidian,analyze_content",
+                    "nlu_description": self._NLU_DESCRIPTION,
                     "current_tasks": str(self._current_task_count),
                     "max_concurrency": "3",
                 },
