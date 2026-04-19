@@ -1,15 +1,19 @@
 """
 LLM 기반 사용자 의도 분석기
+- shared_core.llm 공급자 기반 (Gemini, Claude, Local 지원)
 - 사용자 자연어 입력 → AgentMessage 리스트 변환
-- Claude API, Gemini API, Claude CLI, Gemini CLI 구현체 제공
 - python-strict-typing 전략: Protocol 기반 다형성
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import os
+import warnings
 from typing import Any, Protocol
 
+from shared_core.llm import LLMGenerateOptions, LLMProviderProtocol, build_llm_provider
 from shared_core.messaging import AgentMessage, AgentName
 
 _FALLBACK_RECEIVER: AgentName = "planning"
@@ -52,7 +56,6 @@ def _parse_agent_messages(
 ) -> list[AgentMessage]:
     """LLM 응답 JSON을 파싱하여 AgentMessage 리스트로 변환합니다."""
     try:
-        # 코드블록 제거 (```json ... ```)
         text = raw.strip()
         if text.startswith("```"):
             lines = text.splitlines()
@@ -111,63 +114,65 @@ class IntentAnalyzerProtocol(Protocol):
         ...
 
 
-class ClaudeAPIIntentAnalyzer:
-    """Anthropic Claude API를 사용하는 의도 분석기. 환경변수: ANTHROPIC_API_KEY"""
+class LLMIntentAnalyzer:
+    """
+    LLMProviderProtocol을 사용하는 의도 분석기.
+    공급자 종류(Gemini, Claude, Local)에 무관하게 동일하게 작동합니다.
+
+    환경 변수:
+        LLM_BACKEND: "gemini" | "claude" | "local" (기본값: gemini)
+    """
+
+    def __init__(self, provider: LLMProviderProtocol | None = None) -> None:
+        self._provider = provider or build_llm_provider()
+
+    async def analyze(
+        self,
+        user_input: str,
+        capabilities: dict[AgentName, str],
+    ) -> list[AgentMessage]:
+        system_prompt = _build_system_prompt(capabilities)
+        raw, _ = await self._provider.generate_response(
+            prompt=user_input,
+            system_instruction=system_prompt,
+            options=LLMGenerateOptions(max_tokens=1024),
+        )
+        return _parse_agent_messages(raw, "orchestra", set(capabilities.keys()))
+
+
+# ── 레거시 별칭 ──────────────────────────────────────────────────────────────────
+# 기존 코드와의 호환성을 위해 유지합니다.
+
+class ClaudeAPIIntentAnalyzer(LLMIntentAnalyzer):
+    """레거시 별칭. LLMIntentAnalyzer(ClaudeProvider)를 사용하세요."""
 
     def __init__(self, model: str = "claude-haiku-4-5-20251001") -> None:
-        import anthropic
-
-        self._client = anthropic.AsyncAnthropic()
-        self._model = model
-
-    async def analyze(
-        self,
-        user_input: str,
-        capabilities: dict[AgentName, str],
-    ) -> list[AgentMessage]:
-
-        system_prompt = _build_system_prompt(capabilities)
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_input}],
-        )
-        raw = response.content[0].text if response.content else "[]"
-        return _parse_agent_messages(raw, "orchestra", set(capabilities.keys()))
+        from shared_core.llm import ClaudeProvider
+        super().__init__(provider=ClaudeProvider(model=model))
 
 
-class GeminiAPIIntentAnalyzer:
-    """Google Gemini API를 사용하는 의도 분석기. 환경변수: GEMINI_API_KEY"""
+class GeminiAPIIntentAnalyzer(LLMIntentAnalyzer):
+    """레거시 별칭. LLMIntentAnalyzer(GeminiProvider)를 사용하세요."""
 
     def __init__(self, model: str = "gemini-2.0-flash") -> None:
-        from google import genai
-
-        self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        self._model = model
-
-    async def analyze(
-        self,
-        user_input: str,
-        capabilities: dict[AgentName, str],
-    ) -> list[AgentMessage]:
-        from google.genai import types
-
-        system_prompt = _build_system_prompt(capabilities)
-        response = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=user_input,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                max_output_tokens=1024,
-            ),
-        )
-        raw = response.text or "[]"
-        return _parse_agent_messages(raw, "orchestra", set(capabilities.keys()))
+        from shared_core.llm import GeminiProvider
+        super().__init__(provider=GeminiProvider(model=model))
 
 
 class ClaudeCLIIntentAnalyzer:
-    """Claude CLI(claude -p)를 subprocess로 호출하는 의도 분석기."""
+    """
+    레거시 subprocess 기반 구현체.
+    대신 LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL 환경변수를 사용하세요.
+    """
+
+    def __init__(self) -> None:
+        warnings.warn(
+            "ClaudeCLIIntentAnalyzer는 deprecated입니다. "
+            "LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL을 사용하세요.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._prompt_prefix = ""
 
     async def analyze(
         self,
@@ -194,7 +199,18 @@ class ClaudeCLIIntentAnalyzer:
 
 
 class GeminiCLIIntentAnalyzer:
-    """Gemini CLI(gemini)를 subprocess로 stdin 파이프로 호출하는 의도 분석기."""
+    """
+    레거시 subprocess 기반 구현체.
+    대신 LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL 환경변수를 사용하세요.
+    """
+
+    def __init__(self) -> None:
+        warnings.warn(
+            "GeminiCLIIntentAnalyzer는 deprecated입니다. "
+            "LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL을 사용하세요.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     async def analyze(
         self,
