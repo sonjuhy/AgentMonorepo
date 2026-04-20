@@ -1,12 +1,16 @@
 """
 LLM 기반 에이전트 라우터/분류기
+- shared_core.llm 공급자 기반 (Gemini, Claude, Local 지원)
 - python-strict-typing 전략: Protocol 기반 다형성
-- Claude API, Gemini API, Claude CLI, Gemini CLI 구현체 제공
 """
 
+from __future__ import annotations
+
 import asyncio
-import os
+import warnings
 from typing import Protocol
+
+from shared_core.llm import LLMGenerateOptions, LLMProviderProtocol, build_llm_provider
 
 from ..models import AGENT_REGISTRY, AgentName, SlackEvent
 
@@ -40,7 +44,6 @@ def _parse_agent_name(raw: str) -> AgentName:
     candidate = raw.strip().lower()
     if candidate in AGENT_REGISTRY:
         return candidate
-    # 부분 매칭 시도
     for name in AGENT_REGISTRY:
         if name in candidate:
             return name
@@ -63,54 +66,60 @@ class ClassifierProtocol(Protocol):
         ...
 
 
-class ClaudeAPIClassifier:
-    """Anthropic Claude API를 사용하는 분류기. 환경변수: ANTHROPIC_API_KEY"""
+class LLMClassifier:
+    """
+    LLMProviderProtocol을 사용하는 에이전트 라우터 분류기.
+    공급자 종류(Gemini, Claude, Local)에 무관하게 동일하게 작동합니다.
+
+    환경 변수:
+        LLM_BACKEND: "gemini" | "claude" | "local" (기본값: gemini)
+    """
+
+    def __init__(self, provider: LLMProviderProtocol | None = None) -> None:
+        self._provider = provider or build_llm_provider()
+        self._system_prompt = _build_system_prompt()
+
+    async def classify(self, event: SlackEvent) -> AgentName:
+        raw, _ = await self._provider.generate_response(
+            prompt=_build_user_prompt(event),
+            system_instruction=self._system_prompt,
+            options=LLMGenerateOptions(max_tokens=64),
+        )
+        return _parse_agent_name(raw)
+
+
+# ── 레거시 별칭 ──────────────────────────────────────────────────────────────────
+# 기존 fastapi_app.py 의 _build_classifier 와의 호환성을 위해 유지합니다.
+
+class ClaudeAPIClassifier(LLMClassifier):
+    """레거시 별칭. LLMClassifier(ClaudeProvider)를 사용하세요."""
 
     def __init__(self, model: str = "claude-haiku-4-5-20251001") -> None:
-        import anthropic
-        self._client = anthropic.AsyncAnthropic()
-        self._model = model
-        self._system_prompt = _build_system_prompt()
-
-    async def classify(self, event: SlackEvent) -> AgentName:
-        import anthropic
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=64,
-            system=self._system_prompt,
-            messages=[{"role": "user", "content": _build_user_prompt(event)}],
-        )
-        raw = response.content[0].text if response.content else _FALLBACK_AGENT
-        return _parse_agent_name(raw)
+        from shared_core.llm import ClaudeProvider
+        super().__init__(provider=ClaudeProvider(model=model))
 
 
-class GeminiAPIClassifier:
-    """Google Gemini API를 사용하는 분류기. 환경변수: GEMINI_API_KEY"""
+class GeminiAPIClassifier(LLMClassifier):
+    """레거시 별칭. LLMClassifier(GeminiProvider)를 사용하세요."""
 
     def __init__(self, model: str = "gemini-2.0-flash") -> None:
-        from google import genai
-        self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        self._model = model
-        self._system_prompt = _build_system_prompt()
-
-    async def classify(self, event: SlackEvent) -> AgentName:
-        from google.genai import types
-        response = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=_build_user_prompt(event),
-            config=types.GenerateContentConfig(
-                system_instruction=self._system_prompt,
-                max_output_tokens=64,
-            ),
-        )
-        raw = response.text or _FALLBACK_AGENT
-        return _parse_agent_name(raw)
+        from shared_core.llm import GeminiProvider
+        super().__init__(provider=GeminiProvider(model=model))
 
 
 class ClaudeCLIClassifier:
-    """Claude CLI(claude -p)를 subprocess로 호출하는 분류기."""
+    """
+    레거시 subprocess 기반 구현체.
+    대신 LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL 환경변수를 사용하세요.
+    """
 
     def __init__(self) -> None:
+        warnings.warn(
+            "ClaudeCLIClassifier는 deprecated입니다. "
+            "LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL을 사용하세요.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._prompt_prefix = _build_system_prompt()
 
     async def classify(self, event: SlackEvent) -> AgentName:
@@ -128,9 +137,18 @@ class ClaudeCLIClassifier:
 
 
 class GeminiCLIClassifier:
-    """Gemini CLI(gemini)를 subprocess로 stdin 파이프로 호출하는 분류기."""
+    """
+    레거시 subprocess 기반 구현체.
+    대신 LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL 환경변수를 사용하세요.
+    """
 
     def __init__(self) -> None:
+        warnings.warn(
+            "GeminiCLIClassifier는 deprecated입니다. "
+            "LLM_BACKEND=local 과 LOCAL_LLM_BASE_URL을 사용하세요.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._prompt_prefix = _build_system_prompt()
 
     async def classify(self, event: SlackEvent) -> AgentName:

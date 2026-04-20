@@ -129,18 +129,18 @@ def _build_classifier(backend: str) -> ClassifierProtocol:
     b = backend.lower()
     if b == "gemini_api":
         from .llm_classifier import GeminiAPIClassifier
-
         return GeminiAPIClassifier()
+    if b == "local":
+        from .llm_classifier import LLMClassifier
+        from shared_core.llm import build_llm_provider
+        return LLMClassifier(provider=build_llm_provider(backend="local"))
     if b == "claude_cli":
         from .llm_classifier import ClaudeCLIClassifier
-
         return ClaudeCLIClassifier()
     if b == "gemini_cli":
         from .llm_classifier import GeminiCLIClassifier
-
         return GeminiCLIClassifier()
     from .llm_classifier import ClaudeAPIClassifier
-
     return ClaudeAPIClassifier()
 
 
