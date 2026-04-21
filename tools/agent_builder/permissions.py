@@ -9,7 +9,7 @@ ContainerPermissions — 에이전트 컨테이너 별 권한 설정 모델
 프리셋:
   minimal  — 네트워크 차단 · 읽기 전용 · 256MB  (계산/코드 실행 에이전트)
   standard — 내부 네트워크 · 읽기 전용 · 512MB  (기본값, 일반 에이전트)
-  trusted  — 전체 네트워크 · 읽기/쓰기 · 1GB   (파일·외부 API 접근 에이전트)
+  trusted  — 전체 네트워크 · 읽기/쓰기 · 1GB · LLM 접근 허용  (파일·외부 API·LLM 접근 에이전트)
 
 사용 예시:
     from tools.agent_builder import AgentBuilder
@@ -24,7 +24,11 @@ ContainerPermissions — 에이전트 컨테이너 별 권한 설정 모델
         filesystem="readwrite",
         memory_mb=1024,
         extra_capabilities=["NET_BIND_SERVICE"],
+        allow_llm_access=True,
     )
+
+    # LLM 접근만 활성화 (외부 API 키 환경변수 자동 주입)
+    perms = ContainerPermissions(network="full", allow_llm_access=True)
 
     builder = AgentBuilder()
     builder.build(..., permissions=perms)
@@ -61,6 +65,14 @@ class ContainerPermissions:
                                예: ["NET_BIND_SERVICE", "CHOWN"]
         run_as_nonroot:      비루트 사용자(appuser)로 실행 여부 (기본 True)
         no_new_privileges:   프로세스 권한 상승(setuid 등) 차단 여부 (기본 True)
+        allow_llm_access:    LLM API 접근 허용 여부.
+                               True이면 llm_env_vars 환경변수를 컨테이너에 주입합니다.
+                               network="none"인 경우 LLM API에 도달할 수 없으므로
+                               allow_llm_access=True와 network="none"을 동시에 설정하면
+                               ValueError가 발생합니다.
+        llm_env_vars:        allow_llm_access=True 시 컨테이너에 주입할 환경변수 목록.
+                               기본값: ANTHROPIC_API_KEY, GEMINI_API_KEY,
+                                        LOCAL_LLM_BASE_URL, LOCAL_LLM_MODEL, LOCAL_LLM_API_KEY
     """
 
     # 네트워크
@@ -81,6 +93,23 @@ class ContainerPermissions:
     # 프로세스 컨텍스트
     run_as_nonroot: bool = True
     no_new_privileges: bool = True
+
+    # LLM 접근
+    allow_llm_access: bool = False
+    llm_env_vars: list[str] = field(default_factory=lambda: [
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "LOCAL_LLM_BASE_URL",
+        "LOCAL_LLM_MODEL",
+        "LOCAL_LLM_API_KEY",
+    ])
+
+    def __post_init__(self) -> None:
+        if self.allow_llm_access and self.network == "none":
+            raise ValueError(
+                "allow_llm_access=True이지만 network='none'으로 LLM API에 도달할 수 없습니다. "
+                "network='internal'(로컬 LLM) 또는 network='full'(외부 API)로 변경하세요."
+            )
 
     # ── 프리셋 팩토리 ─────────────────────────────────────────────────────────
 
@@ -109,8 +138,8 @@ class ContainerPermissions:
     @classmethod
     def trusted(cls) -> ContainerPermissions:
         """
-        신뢰 권한 — 전체 네트워크, 읽기/쓰기 FS, 1GB.
-        외부 API 호출·파일 쓰기가 필요한 에이전트에 적합합니다.
+        신뢰 권한 — 전체 네트워크, 읽기/쓰기 FS, 1GB, LLM 접근 허용.
+        외부 API 호출·파일 쓰기·LLM 사용이 필요한 에이전트에 적합합니다.
         """
         return cls(
             network="full",
@@ -118,6 +147,7 @@ class ContainerPermissions:
             memory_mb=1024,
             cpu_limit=2.0,
             pids_limit=200,
+            allow_llm_access=True,
         )
 
     @classmethod
@@ -197,6 +227,13 @@ class ContainerPermissions:
             lines.append("      - agent_net")
         # "full" → Docker 기본 네트워크, 별도 설정 불필요
 
+        # LLM 접근 환경변수
+        if self.allow_llm_access and self.llm_env_vars:
+            lines.append("    # LLM API 키 — 호스트 환경변수에서 주입 (미설정 시 빈 문자열)")
+            lines.append("    environment:")
+            for var in self.llm_env_vars:
+                lines.append(f"      - {var}=${{{var}:-}}")
+
         return "\n".join(lines)
 
     # ── 사람이 읽을 수 있는 요약 ───────────────────────────────────────────────
@@ -217,6 +254,12 @@ class ContainerPermissions:
 
         caps = ", ".join(self.extra_capabilities) if self.extra_capabilities else "없음"
 
+        if self.allow_llm_access:
+            llm_vars = ", ".join(self.llm_env_vars) if self.llm_env_vars else "없음"
+            llm_desc = f"허용 (주입 변수: {llm_vars})"
+        else:
+            llm_desc = "차단"
+
         return "\n".join([
             f"  네트워크  : {net_desc}",
             f"  파일시스템: {fs_desc}",
@@ -225,6 +268,7 @@ class ContainerPermissions:
             f"  최대 PID  : {self.pids_limit}개",
             f"  비루트 실행: {'예' if self.run_as_nonroot else '아니오 (주의)'}",
             f"  추가 Capability: {caps}",
+            f"  LLM 접근  : {llm_desc}",
         ])
 
     def preset_name(self) -> str:
