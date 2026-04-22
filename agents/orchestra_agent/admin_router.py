@@ -76,7 +76,8 @@ PERMISSION_PRESETS: dict[str, dict[str, Any]] = {
         "cpu_limit": "0.5",
         "pids_limit": 50,
         "cap_drop": "ALL",
-        "description": "단순 계산, 격리된 코드 실행 (네트워크 차단)",
+        "allow_llm_access": False,
+        "description": "단순 계산, 격리된 코드 실행 (네트워크 차단, LLM 접근 불가)",
     },
     "standard": {
         "network": "internal",
@@ -85,7 +86,8 @@ PERMISSION_PRESETS: dict[str, dict[str, Any]] = {
         "cpu_limit": "1.0",
         "pids_limit": 100,
         "cap_drop": "ALL",
-        "description": "일반 에이전트 간 통신 — 기본값 (내부 네트워크만 허용)",
+        "allow_llm_access": False,
+        "description": "일반 에이전트 간 통신 — 기본값 (내부 네트워크만 허용, LLM 접근 불가)",
     },
     "trusted": {
         "network": "full",
@@ -95,9 +97,19 @@ PERMISSION_PRESETS: dict[str, dict[str, Any]] = {
         "pids_limit": 200,
         "cap_drop": "ALL",
         "cap_add": ["NET_BIND_SERVICE"],
-        "description": "외부 API 호출, 로컬 파일 수정 (전체 네트워크 허용)",
+        "allow_llm_access": True,
+        "description": "외부 API 호출, 로컬 파일 수정, LLM 사용 (전체 네트워크 허용)",
     },
 }
+
+# LLM 접근 시 컨테이너에 주입되는 환경변수 목록 (ContainerPermissions 기본값과 동일)
+LLM_ENV_VARS: list[str] = [
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "LOCAL_LLM_BASE_URL",
+    "LOCAL_LLM_MODEL",
+    "LOCAL_LLM_API_KEY",
+]
 
 _CB_THRESHOLD = 3  # health_monitor와 동일 값
 
@@ -110,10 +122,22 @@ class RegisterAgentBody(BaseModel):
     lifecycle_type: str = Field("long_running", description="long_running | ephemeral")
     nlu_description: str = Field("", description="NLU 시스템 프롬프트용 자연어 설명")
     permission_preset: str = Field("standard", description="minimal | standard | trusted")
+    allow_llm_access: bool | None = Field(
+        None,
+        description="LLM 접근 허용 여부. None이면 프리셋 기본값 사용",
+    )
 
 
 class SetPermissionsBody(BaseModel):
     preset: str = Field(..., description="minimal | standard | trusted")
+
+
+class SetLLMAccessBody(BaseModel):
+    allow_llm_access: bool = Field(..., description="LLM API 접근 허용 여부")
+    llm_env_vars: list[str] | None = Field(
+        None,
+        description="주입할 환경변수 목록. None이면 기본값(ANTHROPIC_API_KEY 등) 유지",
+    )
 
 
 class UpdateUserBody(BaseModel):
@@ -297,24 +321,25 @@ async def register_agent(body: RegisterAgentBody) -> dict[str, Any]:
         body.capabilities,
         lifecycle_type=body.lifecycle_type,
         nlu_description=body.nlu_description,
+        permission_preset=body.permission_preset,
+        allow_llm_access=body.allow_llm_access,
     )
 
-    # 권한 프리셋을 레지스트리 데이터에 추가
-    raw = await ctx.redis_client.hget("agents:registry", body.agent_name)
-    if raw:
-        reg_data = json.loads(raw)
-        reg_data["permission_preset"] = body.permission_preset
-        await ctx.redis_client.hset(
-            "agents:registry", body.agent_name,
-            json.dumps(reg_data, ensure_ascii=False),
-        )
-
+    preset = PERMISSION_PRESETS[body.permission_preset]
+    effective_llm_access = (
+        body.allow_llm_access if body.allow_llm_access is not None
+        else preset["allow_llm_access"]
+    )
     return {
         "status": "registered",
         "agent_name": body.agent_name,
         "lifecycle_type": body.lifecycle_type,
         "permission_preset": body.permission_preset,
-        "permissions": PERMISSION_PRESETS[body.permission_preset],
+        "permissions": {**preset, "allow_llm_access": effective_llm_access},
+        "llm_access": {
+            "allow_llm_access": effective_llm_access,
+            "llm_env_vars": LLM_ENV_VARS if effective_llm_access else [],
+        },
     }
 
 
@@ -385,10 +410,22 @@ async def list_permission_presets() -> dict[str, Any]:
 async def get_agent_permissions(agent_name: str) -> dict[str, Any]:
     data = await _require_agent(agent_name)
     preset_name = data.get("permission_preset", "standard")
+    preset = PERMISSION_PRESETS.get(preset_name, PERMISSION_PRESETS["standard"])
+
+    # allow_llm_access는 에이전트별 개별 설정이 프리셋 기본값보다 우선
+    allow_llm_access: bool = data.get(
+        "allow_llm_access", preset.get("allow_llm_access", False)
+    )
+    llm_env_vars: list[str] = data.get("llm_env_vars", LLM_ENV_VARS)
+
     return {
         "agent_name": agent_name,
         "preset": preset_name,
-        "permissions": PERMISSION_PRESETS.get(preset_name, PERMISSION_PRESETS["standard"]),
+        "permissions": {**preset, "allow_llm_access": allow_llm_access},
+        "llm_access": {
+            "allow_llm_access": allow_llm_access,
+            "llm_env_vars": llm_env_vars if allow_llm_access else [],
+        },
         "available_presets": list(PERMISSION_PRESETS.keys()),
     }
 
@@ -399,6 +436,7 @@ async def set_agent_permissions(
 ) -> dict[str, Any]:
     """
     권한 프리셋을 변경합니다.
+    프리셋 변경 시 allow_llm_access는 해당 프리셋의 기본값으로 초기화됩니다.
     실제 Docker 컨테이너 권한은 재시작 시 적용됩니다.
     """
     if body.preset not in PERMISSION_PRESETS:
@@ -408,8 +446,12 @@ async def set_agent_permissions(
                    f"가능한 값: {list(PERMISSION_PRESETS.keys())}",
         )
 
+    preset = PERMISSION_PRESETS[body.preset]
     data = await _require_agent(agent_name)
     data["permission_preset"] = body.preset
+    # 프리셋 변경 시 LLM 접근을 해당 프리셋 기본값으로 초기화
+    data["allow_llm_access"] = preset["allow_llm_access"]
+    data.setdefault("llm_env_vars", LLM_ENV_VARS)
     await ctx.redis_client.hset(
         "agents:registry", agent_name,
         json.dumps(data, ensure_ascii=False),
@@ -418,8 +460,61 @@ async def set_agent_permissions(
     return {
         "agent_name": agent_name,
         "preset": body.preset,
-        "permissions": PERMISSION_PRESETS[body.preset],
+        "permissions": {**preset, "allow_llm_access": data["allow_llm_access"]},
+        "llm_access": {
+            "allow_llm_access": data["allow_llm_access"],
+            "llm_env_vars": data["llm_env_vars"] if data["allow_llm_access"] else [],
+        },
         "note": "컨테이너 재시작 후 실제 Docker 권한에 반영됩니다.",
+    }
+
+
+@router.patch("/agents/{agent_name}/permissions/llm-access", summary="에이전트 LLM 접근 권한 개별 설정")
+async def set_agent_llm_access(
+    agent_name: str, body: SetLLMAccessBody
+) -> dict[str, Any]:
+    """
+    프리셋을 변경하지 않고 LLM 접근 권한만 독립적으로 켜거나 끕니다.
+
+    - `allow_llm_access=true`: ANTHROPIC_API_KEY 등 LLM 환경변수를 컨테이너에 주입합니다.
+    - `allow_llm_access=false`: LLM 환경변수 주입을 비활성화합니다.
+    - `llm_env_vars`: 주입할 변수 목록을 덮어씁니다. 생략 시 기존 목록 유지.
+
+    minimal 프리셋은 network=none이므로 LLM API에 도달할 수 없습니다.
+    실제 Docker 컨테이너 환경변수는 재시작 시 반영됩니다.
+    """
+    data = await _require_agent(agent_name)
+
+    preset_name = data.get("permission_preset", "standard")
+    if body.allow_llm_access and preset_name == "minimal":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "minimal 프리셋은 network=none으로 LLM API에 도달할 수 없습니다. "
+                "먼저 프리셋을 standard 또는 trusted로 변경하세요."
+            ),
+        )
+
+    data["allow_llm_access"] = body.allow_llm_access
+    if body.llm_env_vars is not None:
+        data["llm_env_vars"] = body.llm_env_vars
+    else:
+        data.setdefault("llm_env_vars", LLM_ENV_VARS)
+
+    await ctx.redis_client.hset(
+        "agents:registry", agent_name,
+        json.dumps(data, ensure_ascii=False),
+    )
+
+    effective_env_vars = data["llm_env_vars"] if body.allow_llm_access else []
+    return {
+        "agent_name": agent_name,
+        "preset": preset_name,
+        "llm_access": {
+            "allow_llm_access": body.allow_llm_access,
+            "llm_env_vars": effective_env_vars,
+        },
+        "note": "컨테이너 재시작 후 실제 Docker 환경변수에 반영됩니다.",
     }
 
 

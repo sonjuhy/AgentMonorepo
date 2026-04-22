@@ -202,6 +202,20 @@ class ArchiveAgent:
             # [지능형 요약] 결과 데이터를 인간이 읽기 좋은 마크다운으로 변환
             res_data["content"] = self._generate_human_friendly_content(res_data)
 
+            # 하이브리드 아키텍처: 대용량 메타데이터(JSON) 분산 저장
+            ref_id = None
+            if res_data["raw_data"]:
+                ref_id = await self._storage.save_data(
+                    data=res_data["raw_data"],
+                    metadata={"action": action, "task_id": task_id, "source": "notion"}
+                )
+            
+            res_data["reference_id"] = ref_id
+            res_data["payload_summary"] = res_data["summary"]
+            
+            # 오케스트라 큐 오버헤드를 줄이기 위해 raw_data 삭제
+            res_data.pop("raw_data", None)
+
             return {"task_id": task_id, "status": "COMPLETED", "result_data": res_data, "error": None, "usage_stats": {}}
 
         except Exception as exc:

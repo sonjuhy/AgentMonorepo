@@ -113,6 +113,8 @@ class ArchiveRedisListener:
             "agent": _AGENT_NAME,
             "status": "FAILED",
             "result_data": {},
+            "reference_id": None,
+            "payload_summary": None,
             "error": {"code": "INTERNAL_ERROR", "message": "처리 중 알 수 없는 오류", "traceback": None},
             "usage_stats": {},
         }
@@ -156,6 +158,8 @@ class ArchiveRedisListener:
                     result_data=agent_result.get("result_data", {}),
                     status=agent_result.get("status", "FAILED"),
                     error=agent_result.get("error"),
+                    reference_id=agent_result.get("result_data", {}).get("reference_id"),
+                    payload_summary=agent_result.get("result_data", {}).get("payload_summary"),
                 )
             except Exception as exc:
                 logger.error("[ArchiveRedisListener] 결과 보고 실패 task_id=%s: %s", task_id, exc)
@@ -169,6 +173,8 @@ class ArchiveRedisListener:
         result_data: dict[str, Any],
         status: str,
         error: dict[str, Any] | None,
+        reference_id: str | None = None,
+        payload_summary: str | None = None,
     ) -> None:
         """
         처리 결과를 OrchestraManager POST /results 엔드포인트로 전송합니다.
@@ -179,6 +185,8 @@ class ArchiveRedisListener:
             "agent": agent,
             "status": status,
             "result_data": result_data,
+            "reference_id": reference_id,
+            "payload_summary": payload_summary,
             "error": error,
             "usage_stats": {},
         }

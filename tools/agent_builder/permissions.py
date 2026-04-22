@@ -229,7 +229,7 @@ class ContainerPermissions:
 
         # LLM 접근 환경변수
         if self.allow_llm_access and self.llm_env_vars:
-            lines.append("    # LLM API 키 — 호스트 환경변수에서 주입 (미설정 시 빈 문자열)")
+            lines.append("    # LLM API 키 - 호스트 환경변수에서 주입 (미설정 시 빈 문자열)")
             lines.append("    environment:")
             for var in self.llm_env_vars:
                 lines.append(f"      - {var}=${{{var}:-}}")

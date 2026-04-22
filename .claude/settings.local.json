@@ -4,7 +4,19 @@
       "Skill(claude-api)",
       "Skill(claude-api:*)",
       "Bash(python -c \":*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(redis-cli -h 127.0.0.1 -p 6379 ping)",
+      "Bash(redis-cli -h localhost -p 6379 ping)",
+      "Bash(where redis-cli:*)",
+      "Bash(python -c \"import socket; s=socket.create_connection\\(\\('127.0.0.1',6379\\),timeout=3\\); print\\('CONNECTED'\\); s.close\\(\\)\")",
+      "Bash(python -c \"import socket; s=socket.create_connection\\(\\('localhost',6379\\),timeout=3\\); print\\('CONNECTED'\\); s.close\\(\\)\")",
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(ls -la /c/WorkSpace/Dev/Python/AgentMonorepo/*.md)",
+      "Bash(xargs grep *)",
+      "Bash(xargs ls *)",
+      "Bash(iconv -f utf-8 -t utf-8)"
     ]
   }
 }

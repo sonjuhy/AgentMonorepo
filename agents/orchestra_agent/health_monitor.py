@@ -105,15 +105,37 @@ class HealthMonitor:
         # Redis 조회 실패 또는 등록된 에이전트 없음 → 캐시 그대로 반환 (빈 문자열 포함)
         return self._capabilities_cache
 
-    async def register_agent(self, agent_name: str, capabilities: list[str], lifecycle_type: str = "long_running", nlu_description: str = "") -> None:
+    async def register_agent(
+        self,
+        agent_name: str,
+        capabilities: list[str],
+        lifecycle_type: str = "long_running",
+        nlu_description: str = "",
+        permission_preset: str = "standard",
+        allow_llm_access: bool | None = None,
+    ) -> None:
+        from .admin_router import LLM_ENV_VARS, PERMISSION_PRESETS
+
+        preset = PERMISSION_PRESETS.get(permission_preset, PERMISSION_PRESETS["standard"])
+        # allow_llm_access 미지정 시 프리셋 기본값 사용
+        effective_llm_access = (
+            allow_llm_access if allow_llm_access is not None
+            else preset.get("allow_llm_access", False)
+        )
         await self._redis.hset("agents:registry", agent_name, json.dumps({
             "name": agent_name,
             "capabilities": capabilities,
             "lifecycle_type": lifecycle_type,
             "nlu_description": nlu_description,
-            "registered_at": datetime.now(timezone.utc).isoformat()
+            "permission_preset": permission_preset,
+            "allow_llm_access": effective_llm_access,
+            "llm_env_vars": LLM_ENV_VARS,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
         }, ensure_ascii=False))
-        logger.info("[HealthMonitor] 에이전트 등록: %s (%s)", agent_name, lifecycle_type)
+        logger.info(
+            "[HealthMonitor] 에이전트 등록: %s (%s, preset=%s, llm_access=%s)",
+            agent_name, lifecycle_type, permission_preset, effective_llm_access,
+        )
 
     async def get_available_agents(self) -> list[str]:
         registry = await self._redis.hgetall("agents:registry")

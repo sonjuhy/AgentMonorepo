@@ -1,10 +1,11 @@
 """DB에서 현황 컬럼의 status 옵션 이름을 hex로 출력"""
+
 import os
 
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(encoding="utf-8", override=True)
 
 if "NOTION_DATABASE_ID" not in os.environ and "NOTION_DB_ID" in os.environ:
     os.environ["NOTION_DATABASE_ID"] = os.environ["NOTION_DB_ID"]

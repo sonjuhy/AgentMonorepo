@@ -99,12 +99,21 @@ class ResearchAgent:
                     "error": {"code": "EXECUTION_ERROR", "message": result.get("message", "실행 오류"), "traceback": None},
                 }
             else:
+                raw_text = result.get("data", "")
+                # 하이브리드 아키텍처: 대용량 원문을 로컬에 저장하고 reference_id 발급
+                ref_id = await self._storage.save_data(
+                    data={"raw_text": raw_text},
+                    metadata={"action": action, "task_id": task_id}
+                )
+                summary = f"{action} 완료 (길이: {len(raw_text)}자)"
+
                 agent_result = {
                     "status": "COMPLETED",
                     "result_data": {
-                        "summary": f"{action} 완료",
-                        "raw_text": result.get("data", ""),
+                        "summary": summary,
                     },
+                    "reference_id": ref_id,
+                    "payload_summary": summary,
                     "error": None,
                 }
 
@@ -123,6 +132,8 @@ class ResearchAgent:
                     status=agent_result.get("status", "FAILED"),
                     result_data=agent_result.get("result_data", {}),
                     error=agent_result.get("error"),
+                    reference_id=agent_result.get("reference_id"),
+                    payload_summary=agent_result.get("payload_summary"),
                 )
             except Exception as exc:
                 logger.error("[ResearchAgent] 결과 보고 실패 task_id=%s: %s", task_id, exc)

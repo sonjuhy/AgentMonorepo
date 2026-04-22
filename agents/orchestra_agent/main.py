@@ -316,13 +316,22 @@ async def receive_result(result: AgentResultBody) -> dict[str, Any]:
 
 @app.post("/logs", tags=["에이전트"])
 async def receive_log(body: AgentLogBody) -> dict[str, Any]:
+    # 대용량 로그로 인한 오케스트라 DB 부하 방지 (Hybrid Architecture)
+    message = body.message if len(body.message) <= 1000 else body.message[:1000] + "...(truncated)"
+    payload = body.payload
+    
+    if payload:
+        payload_str = json.dumps(payload, ensure_ascii=False)
+        if len(payload_str) > 2000:
+            payload = {"_truncated_": True, "note": "Payload too large to be stored in central DB."}
+            
     await ctx.state_manager.add_agent_log(
         body.agent_name,
         body.action,
-        body.message,
+        message,
         body.task_id,
         body.session_id,
-        body.payload,
+        payload,
     )
     return {"status": "logged"}
 

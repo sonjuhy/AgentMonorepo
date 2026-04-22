@@ -14,6 +14,8 @@ class AgentMessage(BaseModel):
         receiver: 메시지를 받을 에이전트의 식별자.
         action: 수신 에이전트가 실행할 작업 이름.
         payload: 작업에 필요한 상세 데이터.
+        reference_id: 대용량 데이터(도메인 데이터 등) 분산 저장을 위한 참조 식별자 (Hybrid Architecture 용).
+        payload_summary: 대용량 데이터의 요약본 (Hybrid Architecture 용).
         timestamp: 메시지 생성 시각 (UTC).
     """
 
@@ -23,6 +25,8 @@ class AgentMessage(BaseModel):
     receiver: AgentName
     action: ActionName
     payload: dict[str, Any] = Field(default_factory=dict)
+    reference_id: str | None = None
+    payload_summary: str | None = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
     def to_json(self) -> str:

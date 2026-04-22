@@ -139,6 +139,8 @@ class AgentResult(TypedDict):
     agent: str             # 결과를 보낸 에이전트 이름
     status: str            # COMPLETED | FAILED | WAITING_USER | PROCESSING
     result_data: dict[str, Any]
+    reference_id: str | None
+    payload_summary: str | None
     error: AgentResultError | None
     usage_stats: dict[str, Any]
 

@@ -43,6 +43,7 @@ class StateManager:
         if self._db_conn is None:
             self._db_conn = await aiosqlite.connect(self._db_path)
             self._db_conn.row_factory = aiosqlite.Row
+            await self._db_conn.execute("PRAGMA journal_mode=WAL")
             await self._create_tables()
         return self._db_conn
 

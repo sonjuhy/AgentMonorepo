@@ -2,7 +2,7 @@ import os
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(encoding="utf-8", override=True)
 
 # .env에 NOTION_DATABASE_ID 대신 NOTION_DB_ID만 있는 경우를 위한 Fallback
 if "NOTION_DATABASE_ID" not in os.environ and "NOTION_DB_ID" in os.environ:
@@ -29,8 +29,8 @@ try:
     print("\n--- Properties Schema ---")
     for prop_name, prop_info in db_data.get("properties", {}).items():
         print(f"Name: {prop_name}, Type: {prop_info['type']}")
-        if prop_info['type'] == 'status':
-            options = [opt['name'] for opt in prop_info['status']['options']]
+        if prop_info["type"] == "status":
+            options = [opt["name"] for opt in prop_info["status"]["options"]]
             print(f"  Status Options: {options}")
 
     # 2. 필터 없이 1개만 조회해보기
