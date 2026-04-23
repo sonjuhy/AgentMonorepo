@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
@@ -81,8 +82,8 @@ class DirectResponseNLUResult(BaseModel):
 # NLU 결과 타입 유니온
 NLUResult = SingleNLUResult | MultiStepNLUResult | ClarificationNLUResult | DirectResponseNLUResult
 
-# 신뢰도 임계값
-NLU_CONFIDENCE_THRESHOLD = 0.7
+# 신뢰도 임계값 (환경변수 NLU_CONFIDENCE_THRESHOLD로 재정의 가능)
+NLU_CONFIDENCE_THRESHOLD: float = float(os.environ.get("NLU_CONFIDENCE_THRESHOLD", "0.7"))
 
 
 # ── Redis 통신 메시지 스키마 (TypedDict) ──────────────────────────────────────
@@ -166,17 +167,33 @@ class CommAgentMessage(TypedDict):
     progress_percent: int | None    # None = 최종 결과, 0~99 = 진행 중
 
 
+def _build_timeout_map() -> dict[str, int]:
+    """에이전트별 기본 타임아웃 맵을 반환합니다.
+    AGENT_TIMEOUT_OVERRIDES 환경변수로 개별 재정의 가능 (예: "coding_agent:900,file_agent:180").
+    """
+    base: dict[str, int] = {
+        "coding_agent": 600,
+        "archive_agent": 300,
+        "research_agent": 300,
+        "calendar_agent": 60,
+        "file_agent": 120,
+        "communication_agent": 30,
+        "sandbox_agent": 60,
+        "agent_builder": 120,
+    }
+    for entry in os.environ.get("AGENT_TIMEOUT_OVERRIDES", "").split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            name, val = entry.split(":", 1)
+            try:
+                base[name.strip()] = int(val.strip())
+            except ValueError:
+                pass
+    return base
+
 # 에이전트 레지스트리: 에이전트 이름 → 기본 timeout(초)
-AGENT_TIMEOUT_MAP: dict[str, int] = {
-    "coding_agent": 600,
-    "archive_agent": 300,
-    "research_agent": 300,
-    "calendar_agent": 60,
-    "file_agent": 120,
-    "communication_agent": 30,
-    "sandbox_agent": 60,
-    "agent_builder": 120,   # 로컬 빌드 (패키지 검증 포함), Redis 큐 미사용
-}
+# 환경변수 AGENT_TIMEOUT_OVERRIDES="agent_name:seconds,..." 로 개별 재정의 가능
+AGENT_TIMEOUT_MAP: dict[str, int] = _build_timeout_map()
 
 # 재시도 가능한 에러 코드
 RETRYABLE_ERROR_CODES: frozenset[str] = frozenset({

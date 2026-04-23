@@ -19,6 +19,8 @@ from typing import Any
 import redis.asyncio as aioredis
 
 from .health_monitor import HealthMonitor
+from .sandbox_tool import SandboxTool
+from .scheduler import ScheduledTaskRunner
 from .models import (
     AGENT_TIMEOUT_MAP,
     RETRYABLE_ERROR_CODES,
@@ -41,8 +43,12 @@ logger = logging.getLogger("orchestra_agent.manager")
 _ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
 _RESULTS_KEY_PREFIX = "orchestra:results:"
 _APPROVAL_KEY_PREFIX = "orchestra:approval:"
+_DLQ_KEY = "orchestra:dlq"
 _MSG_VERSION = "1.1"
-_APPROVAL_TIMEOUT_SEC = 300
+_APPROVAL_TIMEOUT_SEC: int = int(os.environ.get("APPROVAL_TIMEOUT_SEC", "300"))
+_BLPOP_TIMEOUT: int = int(os.environ.get("BLPOP_TIMEOUT", "5"))
+_LLM_MODEL: str = os.environ.get("NLU_LLM_MODEL", "gemini-2.0-flash")
+_LLM_TEMPERATURE: float = float(os.environ.get("NLU_LLM_TEMPERATURE", "0.2"))
 
 # 플랫폼별 통신 큐 (source → queue key)
 _PLATFORM_COMM_QUEUE: dict[str, str] = {
@@ -81,7 +87,7 @@ def _build_dispatch_message(
         "priority": "MEDIUM",
         "timeout": timeout,
         "metadata": {
-            "llm_config": {"model": "gemini-2.0-flash", "temperature": 0.2},
+            "llm_config": {"model": _LLM_MODEL, "temperature": _LLM_TEMPERATURE},
             "step_info": step_info or {},
             "requires_user_approval": requires_approval,
         },
@@ -118,6 +124,7 @@ class OrchestraManager:
         nlu_engine: GeminiNLUEngine | None = None,
         state_manager: StateManager | None = None,
         health_monitor: HealthMonitor | None = None,
+        sandbox_tool: SandboxTool | None = None,
     ) -> None:
         if redis_client is not None:
             self._redis = redis_client
@@ -128,13 +135,24 @@ class OrchestraManager:
         self._nlu = nlu_engine or build_nlu_engine()
         self._state = state_manager or StateManager(redis_client=self._redis)
         self._health = health_monitor or HealthMonitor(redis_client=self._redis)
+        self._sandbox_tool: SandboxTool | None = sandbox_tool
+        self.scheduler = ScheduledTaskRunner(redis_client=self._redis)
+
+    async def start_background_tasks(self) -> list[asyncio.Task]:
+        """헬스 모니터와 스케줄러를 백그라운드 태스크로 시작합니다."""
+        tasks = [
+            asyncio.create_task(self._health.monitor_loop(), name="health_monitor"),
+            asyncio.create_task(self.scheduler.run_loop(), name="scheduler"),
+        ]
+        logger.info("[OrchestraManager] 백그라운드 태스크 시작 (health_monitor, scheduler)")
+        return tasks
 
     async def listen_tasks(self) -> None:
         """메인 루프: Redis 큐에서 작업을 수신합니다."""
         logger.info("[OrchestraManager] 메인 루프 시작")
         while True:
             try:
-                result = await self._redis.blpop(_ORCHESTRA_TASKS_KEY, timeout=5)
+                result = await self._redis.blpop(_ORCHESTRA_TASKS_KEY, timeout=_BLPOP_TIMEOUT)
                 if result is None: continue
 
                 _, raw = result
@@ -198,10 +216,12 @@ class OrchestraManager:
         agent_name = nlu_result.selected_agent
         dispatch_task_id = str(uuid.uuid4())
 
-        ready, reason = await self._health.is_agent_ready(agent_name)
-        if not ready:
-            await self._send_agent_unavailable_error(task, agent_name, reason)
-            return
+        # 내부 도구(sandbox)는 헬스체크 없이 직접 실행
+        if not self._is_internal_tool(agent_name):
+            ready, reason = await self._health.is_agent_ready(agent_name)
+            if not ready:
+                await self._send_agent_unavailable_error(task, agent_name, reason)
+                return
 
         timeout = AGENT_TIMEOUT_MAP.get(agent_name, 300)
         dispatch = _build_dispatch_message(
@@ -210,8 +230,7 @@ class OrchestraManager:
             requires_approval=nlu_result.metadata.requires_user_approval
         )
 
-        await self._dispatch_to_agent(agent_name, dispatch)
-        result = await self.wait_for_result(dispatch_task_id, timeout=timeout)
+        result = await self._execute_agent_task(agent_name, dispatch_task_id, dispatch, timeout)
         await self._handle_agent_result(result, task, nlu_result.metadata.requires_user_approval)
 
     async def run_plan(self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask) -> None:
@@ -233,8 +252,7 @@ class OrchestraManager:
             )
 
             await self._send_progress_to_comm(original_task, int((step.step-1)/total_steps*100), f"[{step.step}/{total_steps}] {step.selected_agent} 작업 중...")
-            await self._dispatch_to_agent(step.selected_agent, dispatch)
-            result = await self.wait_for_result(dispatch_task_id, timeout=timeout)
+            result = await self._execute_agent_task(step.selected_agent, dispatch_task_id, dispatch, timeout)
             
             if result.get("status") == "FAILED":
                 await self._send_error_to_user(original_task, result.get("error", {}).get("message", "오류"), step.selected_agent)
@@ -254,10 +272,29 @@ class OrchestraManager:
         key = f"{_RESULTS_KEY_PREFIX}{task_id}"
         remaining = timeout
         while remaining > 0:
-            res = await self._redis.blpop(key, timeout=min(5, remaining))
+            res = await self._redis.blpop(key, timeout=min(_BLPOP_TIMEOUT, remaining))
             if res: return json.loads(res[1])
-            remaining -= 5
-        return {"status": "FAILED", "error": {"message": "타임아웃"}}
+            remaining -= _BLPOP_TIMEOUT
+        failed: dict[str, Any] = {
+            "status": "FAILED",
+            "task_id": task_id,
+            "error": {"code": "TIMEOUT", "message": f"에이전트 응답 없음 ({timeout}초 초과)", "traceback": None},
+        }
+        await self._push_to_dlq("timeout", task_id, failed["error"])
+        return failed
+
+    async def _push_to_dlq(self, reason: str, task_id: str, error: dict[str, Any]) -> None:
+        entry = {
+            "reason": reason,
+            "task_id": task_id,
+            "error": error,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            await self._redis.rpush(_DLQ_KEY, json.dumps(entry, ensure_ascii=False))
+            logger.warning("[OrchestraManager] DLQ 저장: task_id=%s reason=%s", task_id, reason)
+        except Exception as exc:
+            logger.error("[OrchestraManager] DLQ 저장 실패: %s", exc)
 
     async def receive_agent_result(self, result: AgentResult) -> None:
         task_id = result["task_id"]
@@ -289,6 +326,57 @@ class OrchestraManager:
         await self._redis.rpush(comm_queue, json.dumps(msg, ensure_ascii=False))
         res = await self._redis.blpop(f"{_APPROVAL_KEY_PREFIX}{approval_id}", timeout=_APPROVAL_TIMEOUT_SEC)
         return json.loads(res[1]).get("action") == "approve" if res else False
+
+    def _is_internal_tool(self, agent_name: str) -> bool:
+        """에이전트가 인프로세스 내부 도구인지 확인합니다."""
+        return agent_name == "sandbox_agent" and self._sandbox_tool is not None
+
+    async def _execute_agent_task(
+        self,
+        agent_name: str,
+        task_id: str,
+        dispatch: DispatchMessage,
+        timeout: int,
+    ) -> dict[str, Any]:
+        """에이전트 작업 실행: sandbox는 인프로세스 직접 실행, 나머지는 Redis 큐 경유."""
+        if self._is_internal_tool(agent_name):
+            return await self._run_sandbox_task(task_id, dispatch["params"])
+        await self._dispatch_to_agent(agent_name, dispatch)
+        return await self.wait_for_result(task_id, timeout=timeout)
+
+    async def _run_sandbox_task(self, task_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        """SandboxTool을 통해 코드를 직접 실행하고 AgentResult 형식으로 반환합니다."""
+        try:
+            result = await self._sandbox_tool.execute_code(params)  # type: ignore[union-attr]
+            return {
+                "task_id": task_id,
+                "status": "COMPLETED",
+                "result_data": {
+                    **result,
+                    "summary": f"코드 실행 완료 (exit_code={result['exit_code']})",
+                    "content": result.get("stdout", ""),
+                },
+                "error": None,
+                "usage_stats": {
+                    "runtime": result.get("runtime_used"),
+                    "elapsed_ms": result.get("execution_time_ms"),
+                },
+            }
+        except ValueError as exc:
+            return {
+                "task_id": task_id, "status": "FAILED",
+                "result_data": {},
+                "error": {"code": "INVALID_PARAMS", "message": str(exc), "traceback": None},
+                "usage_stats": {},
+            }
+        except Exception as exc:
+            logger.error("[OrchestraManager] 샌드박스 실행 실패: task_id=%s %s", task_id, exc)
+            return {
+                "task_id": task_id, "status": "FAILED",
+                "result_data": {},
+                "error": {"code": "EXECUTION_ERROR", "message": str(exc), "traceback": None},
+                "usage_stats": {},
+            }
 
     async def _dispatch_to_agent(self, agent_name: str, dispatch: DispatchMessage) -> None:
         await self._redis.rpush(f"agent:{agent_name}:tasks", json.dumps(dispatch, ensure_ascii=False))

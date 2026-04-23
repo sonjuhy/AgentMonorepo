@@ -123,7 +123,7 @@ class StateManager:
     async def build_context_for_llm(self, session_id: str, user_id: str, provider: str = "gemini") -> list[dict[str, Any]]:
         db = await self.ensure_db()
         async with db.execute(
-            "SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY id DESC LIMIT ?",
             (session_id, _HISTORY_LIMIT)
         ) as cursor:
             rows = await cursor.fetchall()
@@ -279,7 +279,7 @@ class StateManager:
         db = await self.ensure_db()
         async with db.execute(
             "SELECT role, content, provider, created_at FROM chat_history "
-            "WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "WHERE session_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
             (session_id, limit, offset),
         ) as cursor:
             rows = await cursor.fetchall()

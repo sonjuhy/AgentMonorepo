@@ -21,11 +21,10 @@ import uuid
 
 from .models import ExecuteRequest, SandboxTaskResult
 
-logger = logging.getLogger("sandbox_agent.docker_sandbox")
+logger = logging.getLogger("orchestra_agent.sandbox.docker_sandbox")
 
 _DOCKER_IMAGE = os.environ.get("SANDBOX_DOCKER_IMAGE", "python:3.12-alpine")
 
-# language → (docker image, interpreter 명령) 매핑
 _LANGUAGE_MAP: dict[str, tuple[str, list[str]]] = {
     "python":     (_DOCKER_IMAGE, ["python3", "-c"]),
     "python3":    (_DOCKER_IMAGE, ["python3", "-c"]),
@@ -38,25 +37,12 @@ _DEFAULT_INTERPRETER: list[str] = ["sh", "-c"]
 
 
 class DockerSandbox:
-    """
-    Docker 컨테이너 기반 격리 실행 환경.
-
-    ephemeral: 태스크마다 새 컨테이너 생성, --rm으로 자동 삭제.
-    """
+    """Docker 컨테이너 기반 격리 실행 환경."""
 
     def __init__(self) -> None:
         self.vm_id = str(uuid.uuid4())[:8]
 
     async def execute(self, req: ExecuteRequest) -> SandboxTaskResult:
-        """
-        Docker 컨테이너에서 코드를 실행하고 결과를 반환합니다.
-
-        Args:
-            req: 실행 요청 (language, code, stdin, timeout, memory_mb, env)
-
-        Returns:
-            SandboxTaskResult (stdout, stderr, exit_code, runtime_used, execution_time_ms)
-        """
         cmd = self._build_cmd(req)
         logger.debug("[DockerSandbox] 실행: %s (vm_id=%s)", cmd[:5], self.vm_id)
 
@@ -73,7 +59,7 @@ class DockerSandbox:
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(input=stdin_bytes),
-                    timeout=req.timeout + 5,  # docker overhead 여유
+                    timeout=req.timeout + 5,
                 )
             except asyncio.TimeoutError:
                 proc.kill()
@@ -103,7 +89,6 @@ class DockerSandbox:
         """no-op — 컨테이너는 --rm으로 자동 삭제됩니다."""
 
     def _build_cmd(self, req: ExecuteRequest) -> list[str]:
-        """docker run 명령어를 구성합니다."""
         image, interpreter = _LANGUAGE_MAP.get(
             req.language.lower(),
             (_DOCKER_IMAGE, _DEFAULT_INTERPRETER),
@@ -114,24 +99,21 @@ class DockerSandbox:
             "--rm",
             "--network=none",
             f"--memory={req.memory_mb}m",
-            "--memory-swap=0",                  # swap 비활성화
+            "--memory-swap=0",
             "--cpus=1",
             "--read-only",
             "--tmpfs=/tmp:size=64m",
             "--no-healthcheck",
             "--security-opt=no-new-privileges",
-            "--cap-drop=ALL",                   # 모든 Linux Capability 제거
-            "--pids-limit=64",                  # 프로세스 폭발(fork bomb) 방지
-            "--user=65534:65534",               # nobody:nobody (비루트 실행)
+            "--cap-drop=ALL",
+            "--pids-limit=64",
+            "--user=65534:65534",
             f"--name=sandbox-{self.vm_id}",
         ]
 
-        # 추가 환경변수
         for key, value in req.env.items():
             cmd += ["-e", f"{key}={value}"]
 
-        # stdin 활성화
         cmd += ["-i"]
-
         cmd += [image] + interpreter + [req.code]
         return cmd

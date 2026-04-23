@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .agent_builder_handler import AgentBuilderHandler
     from .registry import AgentRegistry
     from .marketplace_handler import MarketplaceHandler
+    from .sandbox_tool import SandboxTool
 
 
 class _AppContext:
@@ -25,6 +26,7 @@ class _AppContext:
     builder_handler: AgentBuilderHandler
     registry: AgentRegistry
     marketplace: MarketplaceHandler
+    sandbox_tool: SandboxTool | None = None
     redis_client: aioredis.Redis
     listen_task: asyncio.Task | None = None
     monitor_task: asyncio.Task | None = None

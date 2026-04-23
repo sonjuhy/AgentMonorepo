@@ -61,17 +61,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+load_dotenv(encoding="utf-8", override=True)
+
+from shared_core.llm import OllamaManager
+
 from .app_context import ctx
 from .admin_router import router as admin_router
 from .health_monitor import HealthMonitor
 from .manager import OrchestraManager
 from .nlu_engine import build_nlu_engine
+from .sandbox_tool import SandboxTool
 from .state_manager import StateManager
 from .agent_builder_handler import AgentBuilderHandler
 from .registry import AgentRegistry
 from .marketplace_handler import MarketplaceHandler
 
-load_dotenv(encoding="utf-8", override=True)
+_LLM_BACKEND: str = os.environ.get("LLM_BACKEND", "gemini")
+_OLLAMA_READY_TIMEOUT: int = int(os.environ.get("OLLAMA_READY_TIMEOUT", "120"))
+_LOCAL_LLM_MODEL: str = os.environ.get("LOCAL_LLM_MODEL", "llama3.2")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,7 +93,6 @@ _KNOWN_AGENTS = [
     "calendar_agent",
     "file_agent",
     "communication_agent",
-    "sandbox_agent",
 ]
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -120,6 +126,31 @@ async def lifespan(app: FastAPI):
         ctx.builder_handler, ctx.registry, ctx.health_monitor
     )
 
+    ctx.sandbox_tool = SandboxTool()
+    try:
+        await ctx.sandbox_tool.start()
+        logger.info("[Lifespan] SandboxTool 시작 완료 (runtime=%s)", ctx.sandbox_tool.runtime)
+    except Exception as exc:
+        logger.warning("[Lifespan] SandboxTool 시작 실패 (코드 실행 기능 비활성화): %s", exc)
+        ctx.sandbox_tool = None
+
+    if _LLM_BACKEND == "local":
+        ollama_mgr = OllamaManager()
+        logger.info(
+            "[Lifespan] Ollama 준비 대기 중 (timeout=%ds, model=%s)",
+            _OLLAMA_READY_TIMEOUT, _LOCAL_LLM_MODEL,
+        )
+        if not await ollama_mgr.wait_until_ready(timeout=_OLLAMA_READY_TIMEOUT):
+            raise RuntimeError(
+                f"Ollama 서버 응답 없음 (timeout={_OLLAMA_READY_TIMEOUT}s) — "
+                "OLLAMA_BASE_URL 또는 OLLAMA_READY_TIMEOUT을 확인하세요."
+            )
+        try:
+            await ollama_mgr.ensure_model(_LOCAL_LLM_MODEL)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Ollama 모델 준비 실패 ({_LOCAL_LLM_MODEL}): {exc}") from exc
+        logger.info("[Lifespan] Ollama 준비 완료: %s", _LOCAL_LLM_MODEL)
+
     try:
         nlu_engine = build_nlu_engine()
         logger.info("[Lifespan] NLU 엔진 생성 완료 (%s)", nlu_engine.__class__.__name__)
@@ -134,23 +165,37 @@ async def lifespan(app: FastAPI):
         nlu_engine=nlu_engine,
         state_manager=ctx.state_manager,
         health_monitor=ctx.health_monitor,
+        sandbox_tool=ctx.sandbox_tool,
     )
 
     # 기본 에이전트 레지스트리 등록
-    _AGENT_CONFIGS = {
-        "communication_agent": (["send_message", "ask_clarification"], "long_running"),
-        "coding_agent": (["execute_tdd_cycle", "review_code"], "long_running"),
+    # (caps, lifecycle_type, nlu_description) — nlu_description 생략 시 ""
+    _AGENT_CONFIGS: dict[str, tuple] = {
+        "communication_agent": (["send_message", "ask_clarification"], "long_running", ""),
+        "coding_agent": (["execute_tdd_cycle", "review_code"], "long_running", ""),
         "archive_agent": (
             ["list_databases", "get_page", "create_page", "search"],
-            "long_running",
+            "long_running", "",
         ),
-        "sandbox_agent": (["run_code", "install_package"], "long_running"),
-        "file_agent": (["read_file", "write_file", "search_files"], "ephemeral"),
-        "research_agent": (["search_and_report"], "ephemeral"),
-        "calendar_agent": (["create_event", "query_events"], "ephemeral"),
+        # sandbox_agent: 오케스트라 내부 도구로 편입 — ephemeral 등록으로 헬스체크 없이 항상 가용
+        "sandbox_agent": (
+            ["execute_code", "run_code"],
+            "ephemeral",
+            (
+                "sandbox_agent: Python/JavaScript/Bash 코드를 격리된 VM(Docker/Firecracker)에서 실행합니다. "
+                "params: {language: str, code: str, stdin?: str, timeout?: int, memory_mb?: int}"
+            ),
+        ),
+        "file_agent": (["read_file", "write_file", "search_files"], "ephemeral", ""),
+        "research_agent": (["search_and_report"], "ephemeral", ""),
+        "calendar_agent": (["create_event", "query_events"], "ephemeral", ""),
     }
-    for agent_name, (caps, ltype) in _AGENT_CONFIGS.items():
-        await ctx.health_monitor.register_agent(agent_name, caps, lifecycle_type=ltype)
+    for agent_name, config in _AGENT_CONFIGS.items():
+        caps, ltype = config[0], config[1]
+        nlu_desc = config[2] if len(config) > 2 else ""
+        await ctx.health_monitor.register_agent(
+            agent_name, caps, lifecycle_type=ltype, nlu_description=nlu_desc
+        )
 
     ctx.listen_task = asyncio.create_task(
         ctx.manager.listen_tasks(), name="orchestra_listen_tasks"
@@ -168,6 +213,9 @@ async def lifespan(app: FastAPI):
                 await t
             except asyncio.CancelledError:
                 pass
+
+    if ctx.sandbox_tool is not None:
+        await ctx.sandbox_tool.shutdown()
 
     await ctx.state_manager.close()
     await ctx.redis_client.aclose()
@@ -291,11 +339,13 @@ async def health_check() -> dict[str, Any]:
         redis_ok = False
     system_health = await ctx.health_monitor.get_system_health()
     listen_running = ctx.listen_task is not None and not ctx.listen_task.done()
+    sandbox_stats = ctx.sandbox_tool.pool_stats() if ctx.sandbox_tool is not None else None
     return {
         "status": "ok" if redis_ok and listen_running else "degraded",
         "redis_connected": bool(redis_ok),
         "listen_task_running": listen_running,
         "agents": system_health,
+        "sandbox": sandbox_stats,
     }
 
 

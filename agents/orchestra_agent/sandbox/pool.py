@@ -17,7 +17,7 @@ from typing import Any
 from .models import SandboxRuntime
 from .protocols import SandboxProtocol
 
-logger = logging.getLogger("sandbox_agent.pool")
+logger = logging.getLogger("orchestra_agent.sandbox.pool")
 
 _MIN_READY = int(os.environ.get("VM_POOL_MIN_READY", "3"))
 _MAX_SIZE = int(os.environ.get("VM_POOL_MAX_SIZE", "10"))
@@ -88,10 +88,7 @@ class VMPool:
         self._active_count = max(0, self._active_count - 1)
         self._semaphore.release()
 
-        # 기존 VM 비동기 폐기
         asyncio.create_task(self._close_vm(vm))
-
-        # 풀이 min_ready 미만이면 새 VM 보충
         asyncio.create_task(self._replenish())
 
     async def shutdown(self) -> None:
@@ -130,7 +127,6 @@ class VMPool:
         else:
             from .docker_sandbox import DockerSandbox
             vm = DockerSandbox()
-            # Docker는 별도 start() 불필요 (execute() 시 컨테이너 시작)
         return vm  # type: ignore[return-value]
 
     async def _create_and_enqueue(self) -> None:

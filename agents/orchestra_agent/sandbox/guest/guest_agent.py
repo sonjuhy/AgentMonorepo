@@ -62,21 +62,11 @@ async def _send_json(writer: asyncio.StreamWriter, data: dict) -> None:
 # ── 코드 실행 ─────────────────────────────────────────────────────────────────
 
 async def _execute(req: dict) -> dict:
-    """
-    요청에 따라 코드를 서브프로세스로 실행하고 결과를 반환합니다.
-
-    Args:
-        req: 실행 요청 딕셔너리
-
-    Returns:
-        {"stdout": str, "stderr": str, "exit_code": int}
-    """
     language: str = req.get("language", "python").lower()
     code: str = req.get("code", "")
     stdin_data: str = req.get("stdin", "")
     timeout: int = int(req.get("timeout", 30))
 
-    # 환경변수 병합 (현재 환경 + 요청 환경변수)
     env = {**os.environ}
     extra_env: dict = req.get("env", {})
     env.update(extra_env)
@@ -161,9 +151,6 @@ async def _handle_connection(
 
 async def main() -> None:
     """AF_VSOCK 서버를 시작하고 연결을 대기합니다."""
-    # AF_VSOCK 소켓 생성
-    # Python 3.7+에서 socket.AF_VSOCK(=40)을 직접 지원하지만
-    # 일부 빌드에서 누락될 수 있으므로 raw 상수 사용
     sock = socket.socket(_AF_VSOCK, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((_VMADDR_CID_ANY, _VSOCK_PORT))

@@ -20,10 +20,10 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger("orchestra_agent.health_monitor")
 
-_CB_THRESHOLD = 3
-_CB_WINDOW_SEC = 300
-_HEARTBEAT_VALID_SEC = 30
-_CAPABILITIES_CACHE_TTL = 30  # 캐퍼빌리티 캐시 유효 시간(초)
+_CB_THRESHOLD: int = int(os.environ.get("CB_THRESHOLD", "3"))
+_CB_WINDOW_SEC: int = int(os.environ.get("CB_WINDOW_SEC", "300"))
+_HEARTBEAT_VALID_SEC: int = int(os.environ.get("HEARTBEAT_VALID_SEC", "30"))
+_CAPABILITIES_CACHE_TTL: int = int(os.environ.get("CAPABILITIES_CACHE_TTL", "30"))
 
 
 def _is_heartbeat_recent(last_heartbeat: str) -> bool:

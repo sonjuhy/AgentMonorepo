@@ -6,6 +6,7 @@ OrchestraAgent 구체 구현체
 """
 
 import asyncio
+import os
 from typing import Any
 
 from shared_core.messaging import AgentMessage, AgentName, RedisMessageBroker
@@ -15,8 +16,7 @@ from .registry import AgentRegistry
 
 _AGENT_NAME: AgentName = "orchestra"
 
-# 하위 에이전트 응답 대기 타임아웃 (초)
-_RESPONSE_TIMEOUT_SEC = 30.0
+_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("RESPONSE_TIMEOUT_SEC", "30.0"))
 
 
 class OrchestraAgent:
