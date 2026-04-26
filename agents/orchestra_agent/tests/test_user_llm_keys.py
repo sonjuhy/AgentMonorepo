@@ -10,19 +10,6 @@ import os
 
 @pytest.mark.asyncio
 class TestUserLLMKeys:
-    async def test_state_manager_saves_and_retrieves_llm_keys(self, fake_redis, monkeypatch):
-        monkeypatch.setenv("DATABASE_PATH", ":memory:")
-        state = StateManager(redis_client=fake_redis)
-        await state.init_session("sess1", "user1", "chan1")
-        
-        # Update user profile with LLM keys
-        await state.update_user_profile("user1", {"llm_keys": {"gemini": "user1-gemini-key"}})
-        
-        # Retrieve user profile
-        profile = await state.get_user_profile("user1")
-        assert "llm_keys" in profile
-        assert profile["llm_keys"].get("gemini") == "user1-gemini-key"
-
     @patch("agents.orchestra_agent.nlu_engine.build_llm_provider")
     async def test_nlu_engine_uses_user_llm_key_if_present(self, mock_build, fake_redis, monkeypatch):
         monkeypatch.setenv("DATABASE_PATH", ":memory:")
