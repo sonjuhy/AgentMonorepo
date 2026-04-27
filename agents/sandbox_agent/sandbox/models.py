@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 
 # Python 3.12+ type alias
-type SandboxRuntime = Literal["firecracker", "docker"]
+type SandboxRuntime = Literal["firecracker", "gvisor", "docker"]
 type SandboxStatus = Literal["IDLE", "BUSY", "STARTING", "ERROR"]
 type TaskStatus = Literal["COMPLETED", "FAILED", "TIMEOUT"]
 

@@ -49,9 +49,11 @@ class SandboxClient:
     def __init__(
         self,
         sandbox_url: str = _DEFAULT_SANDBOX_URL,
+        api_key: str | None = None,
         http_timeout: float = 330.0,
     ) -> None:
         self._url = sandbox_url.rstrip("/")
+        self._api_key = api_key
         self._http_timeout = http_timeout
 
     async def execute(
@@ -96,9 +98,17 @@ class SandboxClient:
             "params": req.model_dump(),
         }
 
+        headers = {}
+        if self._api_key:
+            headers["X-Sandbox-API-Key"] = self._api_key
+
         async with httpx.AsyncClient(timeout=self._http_timeout) as http:
             try:
-                resp = await http.post(f"{self._url}/execute", json=payload)
+                resp = await http.post(
+                    f"{self._url}/execute",
+                    json=payload,
+                    headers=headers
+                )
             except httpx.ConnectError as exc:
                 raise SandboxError(
                     f"sandbox_agent에 연결할 수 없습니다: {self._url}"

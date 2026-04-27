@@ -6,7 +6,62 @@
 import os
 import logging
 import httpx
+import re
 from typing import Any
+
+# 민감 정보 패턴 (API 키, 토큰 등)
+_SENSITIVE_PATTERNS = [
+    re.compile(r"sk-[a-zA-Z0-9]{32,}"),             # OpenAI, Anthropic 등
+    re.compile(r"AIzaSy[a-zA-Z0-9_-]{30,40}"),      # Gemini / Google Cloud (약 39자)
+    re.compile(r"ghp_[a-zA-Z0-9]{36}"),             # GitHub Personal Access Token
+    re.compile(r"xox[bap]-[a-zA-Z0-9-]+"),          # Slack Tokens
+    re.compile(r"Bearer\s+[a-zA-Z0-9._-]+"),        # JWT / Bearer Token
+]
+
+class SensitiveDataFilter(logging.Filter):
+    """
+    로그 메시지에서 API 키와 같은 민감한 정보를 자동으로 감지하여 ***MASKED***로 치환하는 필터.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._mask_text(record.msg)
+        
+        # 로그의 args (인자)에 문자열이 포함된 경우도 처리
+        if record.args:
+            new_args = []
+            for arg in record.args:
+                if isinstance(arg, str):
+                    new_args.append(self._mask_text(arg))
+                else:
+                    new_args.append(arg)
+            record.args = tuple(new_args)
+            
+        return True
+
+    def _mask_text(self, text: str) -> str:
+        masked = text
+        for pattern in _SENSITIVE_PATTERNS:
+            masked = pattern.sub("***MASKED***", masked)
+        return masked
+
+def setup_logging(level: int = logging.INFO):
+    """
+    보안 마스킹 필터가 적용된 표준 로깅 설정을 구성합니다.
+    모든 에이전트 시작 시 호출하는 것이 권장됩니다.
+    """
+    # 기본 핸들러 및 포맷 설정
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    
+    # 루트 핸들러에 보안 필터 추가
+    mask_filter = SensitiveDataFilter()
+    for handler in logging.root.handlers:
+        handler.addFilter(mask_filter)
+        
+    logging.getLogger("shared_core.agent_logger").info("보안 로깅 필터가 활성화되었습니다.")
 
 logger = logging.getLogger("shared_core.agent_logger")
 

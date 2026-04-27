@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import redis.asyncio as aioredis
+from cryptography.fernet import Fernet
 
 logger = logging.getLogger("orchestra_agent.state_manager")
 
@@ -23,6 +24,9 @@ _TASK_TTL = 86400
 _MAX_MESSAGES = 20          # Redis 캐시 유지 수
 _HISTORY_LIMIT = 10         # LLM 컨텍스트 포함 DB 이력 수
 _SUMMARIZE_THRESHOLD = 20
+
+# UPDATE users 시 허용되는 컬럼명 화이트리스트 — SQL 인젝션 방어
+_ALLOWED_USER_COLUMNS: frozenset[str] = frozenset({"name", "style_pref", "llm_keys"})
 
 
 class StateManager:
@@ -37,6 +41,15 @@ class StateManager:
 
         self._db_path = os.environ.get("DATABASE_PATH", "sqlite_db.db")
         self._db_conn: aiosqlite.Connection | None = None
+        
+        # 암호화 키 초기화
+        enc_key = os.environ.get("ENCRYPTION_KEY")
+        if not enc_key:
+            raise RuntimeError("ENCRYPTION_KEY 환경변수가 설정되지 않았습니다. 서비스 시작 전에 반드시 설정하세요.")
+        try:
+            self._cipher_suite = Fernet(enc_key.encode('utf-8'))
+        except ValueError as exc:
+            raise RuntimeError(f"ENCRYPTION_KEY가 올바르지 않습니다: {exc}") from exc
 
     async def ensure_db(self) -> aiosqlite.Connection:
         """SQLite 연결 보장 및 테이블 초기화"""
@@ -52,12 +65,34 @@ class StateManager:
             "CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, name TEXT, style_pref TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, session_id TEXT, thread_id TEXT, role TEXT, content TEXT, provider TEXT, tokens_in INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, user_id TEXT, channel_id TEXT, last_summary TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-            "CREATE TABLE IF NOT EXISTS agent_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_name TEXT, task_id TEXT, session_id TEXT, action TEXT, message TEXT, payload TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            "CREATE TABLE IF NOT EXISTS agent_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_name TEXT, task_id TEXT, session_id TEXT, action TEXT, message TEXT, payload TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS task_history (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT UNIQUE, user_id TEXT, content TEXT, status TEXT DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         ]
         db = await self.ensure_db()
-        for q in queries:
-            await db.execute(q)
+        for query in queries:
+            await db.execute(query)
+
+        # 기존 테이블 마이그레이션 (llm_keys 컬럼 추가)
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN llm_keys TEXT")
+        except Exception:
+            pass # 이미 존재하는 경우 무시
+
         await db.commit()
+
+    def _encrypt(self, data: str) -> str:
+        """문자열을 암호화하여 반환합니다."""
+        return self._cipher_suite.encrypt(data.encode('utf-8')).decode('utf-8')
+
+    def _decrypt(self, data: str) -> str:
+        """암호화된 문자열을 복호화하여 반환합니다. 실패 시 빈 JSON 반환."""
+        if not data:
+            return "{}"
+        try:
+            return self._cipher_suite.decrypt(data.encode('utf-8')).decode('utf-8')
+        except Exception as e:
+            logger.error("데이터 복호화 실패: %s", e)
+            return "{}"
 
     # ── 사용자 관리 ─────────────────────────────────────────────────────────
 
@@ -69,21 +104,44 @@ class StateManager:
         if row:
             profile = dict(row)
             profile["style_pref"] = json.loads(profile.get("style_pref", "{}"))
+            
+            # llm_keys 복호화
+            encrypted_keys = profile.get("llm_keys")
+            if encrypted_keys and encrypted_keys.startswith("gAAAAA"):
+                decrypted_keys_str = self._decrypt(encrypted_keys)
+            else:
+                # 마이그레이션 호환성: 평문이거나 빈 값일 경우
+                decrypted_keys_str = encrypted_keys or "{}"
+                
+            try:
+                profile["llm_keys"] = json.loads(decrypted_keys_str)
+            except json.JSONDecodeError:
+                profile["llm_keys"] = {}
+                
             return profile
 
         default_style = {"tone": "친절하고 전문적임", "language": "한국어", "detail_level": "상세함"}
+        empty_keys_encrypted = self._encrypt("{}")
         await db.execute(
-            "INSERT INTO users (user_id, name, style_pref) VALUES (?, ?, ?)",
-            (user_id, "User", json.dumps(default_style, ensure_ascii=False))
+            "INSERT INTO users (user_id, name, style_pref, llm_keys) VALUES (?, ?, ?, ?)",
+            (user_id, "User", json.dumps(default_style, ensure_ascii=False), empty_keys_encrypted)
         )
         await db.commit()
-        return {"user_id": user_id, "name": "User", "style_pref": default_style}
+        return {"user_id": user_id, "name": "User", "style_pref": default_style, "llm_keys": {}}
 
     async def update_user_profile(self, user_id: str, updates: dict[str, Any]) -> None:
+        unknown = set(updates.keys()) - _ALLOWED_USER_COLUMNS
+        if unknown:
+            raise ValueError(f"허용되지 않은 프로필 필드: {unknown}")
+
         db = await self.ensure_db()
         if "style_pref" in updates:
             updates["style_pref"] = json.dumps(updates["style_pref"], ensure_ascii=False)
-        
+        if "llm_keys" in updates:
+            # llm_keys 암호화
+            keys_json_str = json.dumps(updates["llm_keys"], ensure_ascii=False)
+            updates["llm_keys"] = self._encrypt(keys_json_str)
+
         set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
         params = list(updates.values()) + [user_id]
         await db.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", params)
@@ -302,6 +360,77 @@ class StateManager:
         total = total_row[0] if total_row else 0
 
         return [dict(r) for r in rows], total
+
+    # ── 작업 히스토리 ──────────────────────────────────────────────────────────
+
+    async def save_task_history(
+        self, task_id: str, user_id: str, content: str, status: str = "PENDING"
+    ) -> None:
+        """사용자 작업 히스토리에 새 태스크를 저장합니다."""
+        db = await self.ensure_db()
+        await db.execute(
+            "INSERT OR IGNORE INTO task_history (task_id, user_id, content, status) VALUES (?, ?, ?, ?)",
+            (task_id, user_id, content, status),
+        )
+        await db.commit()
+
+    async def update_task_history_status(self, task_id: str, status: str) -> None:
+        """태스크 상태를 업데이트합니다."""
+        db = await self.ensure_db()
+        await db.execute(
+            "UPDATE task_history SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
+            (status, task_id),
+        )
+        await db.commit()
+
+    async def get_user_task_history(
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
+        status_filter: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """사용자의 작업 히스토리를 최신순으로 반환합니다."""
+        db = await self.ensure_db()
+        conditions = ["user_id = ?"]
+        params: list[Any] = [user_id]
+
+        if status_filter:
+            conditions.append("status = ?")
+            params.append(status_filter)
+
+        where = "WHERE " + " AND ".join(conditions)
+        async with db.execute(
+            f"SELECT task_id, user_id, content, status, created_at, updated_at FROM task_history {where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        async with db.execute(
+            f"SELECT COUNT(*) FROM task_history {where}", params
+        ) as cursor:
+            total_row = await cursor.fetchone()
+        total = total_row[0] if total_row else 0
+
+        return [dict(r) for r in rows], total
+
+    # ── Idempotency ────────────────────────────────────────────────────────────
+
+    async def get_idempotency_result(self, key: str) -> dict[str, Any] | None:
+        """Idempotency 키에 캐시된 응답을 반환합니다. 없으면 None."""
+        raw = await self._redis.get(f"idempotency:{key}")
+        if raw:
+            return json.loads(raw)
+        return None
+
+    async def save_idempotency_result(
+        self, key: str, result: dict[str, Any], ttl: int = 86400
+    ) -> None:
+        """Idempotency 결과를 Redis에 저장합니다 (기본 TTL: 24시간)."""
+        await self._redis.setex(
+            f"idempotency:{key}", ttl,
+            json.dumps(result, ensure_ascii=False),
+        )
 
     async def scan_task_ids(self, limit: int = 50) -> list[str]:
         """

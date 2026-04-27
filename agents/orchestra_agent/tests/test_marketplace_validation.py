@@ -7,8 +7,6 @@ TDD: 마켓플레이스 매니페스트 입력값 검증 테스트
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-pytestmark = pytest.mark.skip(reason="마켓플레이스 기능 임시 비활성화로 인한 테스트 스킵")
-
 from agents.orchestra_agent.marketplace_handler import (
     MarketplaceHandler,
     _validate_manifest,

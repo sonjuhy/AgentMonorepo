@@ -169,10 +169,9 @@ class CommAgentMessage(TypedDict):
 
 def _build_timeout_map() -> dict[str, int]:
     """에이전트별 기본 타임아웃 맵을 반환합니다.
-    AGENT_TIMEOUT_OVERRIDES 환경변수로 개별 재정의 가능 (예: "coding_agent:900,file_agent:180").
+    AGENT_TIMEOUT_OVERRIDES 환경변수로 개별 재정의 가능 (예: "archive_agent:900,file_agent:180").
     """
     base: dict[str, int] = {
-        "coding_agent": 600,
         "archive_agent": 300,
         "research_agent": 300,
         "calendar_agent": 60,

@@ -45,28 +45,69 @@ Orchestra Agent FastAPI 서버
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import re
+import socket
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 load_dotenv(encoding="utf-8", override=True)
 
+
+def _validate_callback_url(url: str) -> None:
+    """SSRF 방어: callback_url 에 내부망/루프백/링크로컬 주소가 오지 못하도록 차단한다."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"callback_url 허용되지 않은 스킴: '{parsed.scheme}'. http 또는 https 만 허용됩니다.")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("callback_url 에 호스트가 없습니다.")
+    try:
+        resolved_ip = socket.gethostbyname(hostname)
+    except socket.gaierror as exc:
+        raise ValueError(f"callback_url 호스트를 해석할 수 없습니다: {hostname} — {exc}")
+    addr = ipaddress.ip_address(resolved_ip)
+    if (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    ):
+        raise ValueError(
+            f"callback_url 내부 또는 예약된 IP 주소로의 요청은 허용되지 않습니다: {resolved_ip}"
+        )
+
+
 from shared_core.llm import OllamaManager
+from shared_core.agent_logger import setup_logging
+from shared_core.dispatch_auth import sign_task, verify_task, DispatchAuthError
 
 from .app_context import ctx
+from .auth import CLIENT_API_KEY, verify_admin_key, verify_client_key
+
+# 보안 마스킹 필터가 적용된 로깅 설정 활성화
+setup_logging()
+
+logger = logging.getLogger("orchestra_agent.main")
 from .admin_router import router as admin_router
+from .error_messages import build_error_response, get_user_message
+from .rate_limiter import RateLimiter
 from .health_monitor import HealthMonitor
 from .manager import OrchestraManager
 from .nlu_engine import build_nlu_engine
@@ -76,7 +117,6 @@ from .agent_builder_handler import AgentBuilderHandler
 from .registry import AgentRegistry
 from .marketplace_handler import MarketplaceHandler
 
-_LLM_BACKEND: str = os.environ.get("LLM_BACKEND", "gemini")
 _OLLAMA_READY_TIMEOUT: int = int(os.environ.get("OLLAMA_READY_TIMEOUT", "120"))
 _LOCAL_LLM_MODEL: str = os.environ.get("LOCAL_LLM_MODEL", "llama3.2")
 
@@ -87,7 +127,6 @@ logging.basicConfig(
 logger = logging.getLogger("orchestra_agent.main")
 
 _KNOWN_AGENTS = [
-    "coding_agent",
     "archive_agent",
     "research_agent",
     "calendar_agent",
@@ -134,7 +173,9 @@ async def lifespan(app: FastAPI):
         logger.warning("[Lifespan] SandboxTool 시작 실패 (코드 실행 기능 비활성화): %s", exc)
         ctx.sandbox_tool = None
 
-    if _LLM_BACKEND == "local":
+    llm_backend = os.environ.get("LLM_BACKEND", "gemini").lower()
+    
+    if llm_backend == "local":
         ollama_mgr = OllamaManager()
         logger.info(
             "[Lifespan] Ollama 준비 대기 중 (timeout=%ds, model=%s)",
@@ -169,13 +210,12 @@ async def lifespan(app: FastAPI):
     )
 
     # 기본 에이전트 레지스트리 등록
-    # (caps, lifecycle_type, nlu_description) — nlu_description 생략 시 ""
+    # (caps, lifecycle_type, nlu_description, permission_preset) — nlu_description 생략 시 ""
     _AGENT_CONFIGS: dict[str, tuple] = {
-        "communication_agent": (["send_message", "ask_clarification"], "long_running", ""),
-        "coding_agent": (["execute_tdd_cycle", "review_code"], "long_running", ""),
+        "communication_agent": (["send_message", "ask_clarification"], "long_running", "", "standard"),
         "archive_agent": (
             ["list_databases", "get_page", "create_page", "search"],
-            "long_running", "",
+            "long_running", "", "standard",
         ),
         # sandbox_agent: 오케스트라 내부 도구로 편입 — ephemeral 등록으로 헬스체크 없이 항상 가용
         "sandbox_agent": (
@@ -185,16 +225,18 @@ async def lifespan(app: FastAPI):
                 "sandbox_agent: Python/JavaScript/Bash 코드를 격리된 VM(Docker/Firecracker)에서 실행합니다. "
                 "params: {language: str, code: str, stdin?: str, timeout?: int, memory_mb?: int}"
             ),
+            "minimal"
         ),
-        "file_agent": (["read_file", "write_file", "search_files"], "ephemeral", ""),
-        "research_agent": (["search_and_report"], "ephemeral", ""),
-        "calendar_agent": (["create_event", "query_events"], "ephemeral", ""),
+        "file_agent": (["read_file", "write_file", "search_files"], "ephemeral", "", "standard"),
+        "research_agent": (["search_and_report"], "ephemeral", "", "trusted"),
+        "calendar_agent": (["create_event", "query_events"], "ephemeral", "", "trusted"),
     }
     for agent_name, config in _AGENT_CONFIGS.items():
         caps, ltype = config[0], config[1]
         nlu_desc = config[2] if len(config) > 2 else ""
+        preset = config[3] if len(config) > 3 else "standard"
         await ctx.health_monitor.register_agent(
-            agent_name, caps, lifecycle_type=ltype, nlu_description=nlu_desc
+            agent_name, caps, lifecycle_type=ltype, nlu_description=nlu_desc, permission_preset=preset
         )
 
     ctx.listen_task = asyncio.create_task(
@@ -234,14 +276,20 @@ app = FastAPI(
 )
 
 # CORS — GUI 도구(Electron, 웹 대시보드 등)에서 접근 가능하도록 설정
-_CORS_ORIGINS = os.environ.get(
-    "CORS_ORIGINS",
-    "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",
-).split(",")
+_CORS_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",
+    ).split(",") if o.strip() and o.strip() != "*"
+]
+
+if not _CORS_ORIGINS:
+    logger.warning("CORS_ORIGINS가 비어있거나 '*'입니다. 기본적으로 localhost 접근만 허용됩니다.")
+    _CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _CORS_ORIGINS],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -254,78 +302,90 @@ app.include_router(admin_router)
 
 
 class AgentLogBody(BaseModel):
-    agent_name: str
-    action: str
-    message: str
-    task_id: str | None = None
-    session_id: str | None = None
+    agent_name: str = Field(..., max_length=100)
+    action: str = Field(..., max_length=200)
+    message: str = Field(..., max_length=5000)
+    task_id: str | None = Field(None, max_length=100)
+    session_id: str | None = Field(None, max_length=100)
     payload: dict[str, Any] | None = None
 
 
 class AgentResultErrorBody(BaseModel):
-    code: str
-    message: str
-    traceback: str | None = None
+    code: str = Field(..., max_length=100)
+    message: str = Field(..., max_length=5000)
+    traceback: str | None = Field(None, max_length=20000)
 
 
 class AgentResultBody(BaseModel):
-    task_id: str
-    agent: str = ""
-    status: str
+    task_id: str = Field(..., max_length=100)
+    agent: str = Field(default="", max_length=100)
+    status: str = Field(..., max_length=50)
     result_data: dict[str, Any] = {}
     error: AgentResultErrorBody | None = None
     usage_stats: dict[str, Any] = {}
 
 
 class SubmitTaskBody(BaseModel):
-    content: str = Field(..., description="사용자 자연어 입력")
-    user_id: str = Field(default="api-user")
-    channel_id: str = Field(default="api")
-    session_id: str | None = None
+    content: str = Field(..., description="사용자 자연어 입력", max_length=10000)
+    user_id: str = Field(default="api-user", max_length=100)
+    channel_id: str = Field(default="api", max_length=100)
+    session_id: str | None = Field(None, max_length=100)
+    callback_url: str | None = Field(None, description="작업 완료 시 결과를 POST할 웹훅 URL", max_length=1000)
 
 
 class SubmitMarketplaceInstallBody(BaseModel):
-    item_url: str = Field(..., description="마켓플레이스 에이전트 매니페스트 JSON URL")
-    user_id: str = Field(default="admin")
+    item_url: str = Field(..., description="마켓플레이스 에이전트 매니페스트 JSON URL", max_length=1000)
+    user_id: str = Field(default="admin", max_length=100)
 
 
 class NLUAnalyzeBody(BaseModel):
-    text: str
-    session_id: str = "nlu-session"
-    user_id: str = "api-user"
+    text: str = Field(..., max_length=10000)
+    session_id: str = Field(default="nlu-session", max_length=100)
+    user_id: str = Field(default="api-user", max_length=100)
     include_context: bool = False
 
 
 class DirectDispatchBody(BaseModel):
-    agent_name: str
-    action: str
+    agent_name: str = Field(..., max_length=100)
+    action: str = Field(..., max_length=200)
     params: dict[str, Any] = Field(default_factory=dict)
-    content: str = ""
-    user_id: str = "api-user"
-    channel_id: str = "api"
-    priority: str = "MEDIUM"
+    content: str = Field(default="", max_length=10000)
+    user_id: str = Field(default="api-user", max_length=100)
+    channel_id: str = Field(default="api", max_length=100)
+    priority: str = Field(default="MEDIUM", max_length=50)
     timeout: int = 300
 
 
 class RegisterAgentBody(BaseModel):
-    agent_name: str
+    agent_name: str = Field(..., max_length=100)
     capabilities: list[str] = Field(default_factory=list)
-    lifecycle_type: str = "long_running"
-    nlu_description: str = ""
+    lifecycle_type: str = Field(default="long_running", max_length=50)
+    nlu_description: str = Field(default="", max_length=2000)
 
 
 class HeartbeatBody(BaseModel):
-    status: str = "IDLE"
+    status: str = Field(default="IDLE", max_length=50)
     current_tasks: int = 0
-    version: str = "1.0.0"
+    version: str = Field(default="1.0.0", max_length=50)
     capabilities: list[str] = Field(default_factory=list)
     max_concurrency: int = 1
-    nlu_description: str = ""
+    nlu_description: str = Field(default="", max_length=2000)
 
 
 class UpdateUserProfileBody(BaseModel):
-    name: str | None = None
+    name: str | None = Field(None, max_length=100)
     style_pref: dict[str, str] | None = None
+
+
+class ApprovalRespondBody(BaseModel):
+    action: str = Field(..., pattern="^(approve|reject)$", description="approve 또는 reject", max_length=20)
+
+
+class LLMKeyUpdateBody(BaseModel):
+    api_key: str = Field(..., description="LLM 제공업체의 API 키.", max_length=300)
+
+
+SUPPORTED_LLM_PROVIDERS = ["gemini", "claude", "openai", "local"]
 
 
 # ── 시스템 엔드포인트 ──────────────────────────────────────────────────────────
@@ -358,22 +418,57 @@ async def queue_status() -> dict[str, Any]:
 # ── 하위 에이전트 수신 엔드포인트 ────────────────────────────────────────────
 
 
-@app.post("/results", tags=["에이전트"])
+@app.post("/results", tags=["에이전트"], dependencies=[Depends(verify_client_key)])
 async def receive_result(result: AgentResultBody) -> dict[str, Any]:
-    await ctx.manager.receive_agent_result(result.model_dump())
+    result_dict = result.model_dump()
+    await ctx.manager.receive_agent_result(result_dict)
+
+    # 작업 히스토리 상태 업데이트
+    await ctx.state_manager.update_task_history_status(result.task_id, result.status)
+
+    # 웹훅 콜백 — 비동기 발송 (실패해도 응답에 영향 없음)
+    callback_url = await ctx.redis_client.get(f"task:{result.task_id}:callback_url")
+    if callback_url and result.status in ("COMPLETED", "FAILED"):
+        asyncio.create_task(_fire_webhook(callback_url, result_dict))
+
     return {"status": "accepted", "task_id": result.task_id}
 
 
-@app.post("/logs", tags=["에이전트"])
+async def _fire_webhook(url: str, payload: dict[str, Any]) -> None:
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(url, json=payload)
+        logger.info("[Webhook] 콜백 발송 완료: %s", url)
+    except Exception as exc:
+        logger.warning("[Webhook] 콜백 발송 실패: %s — %s", url, exc)
+
+
+@app.post("/logs", tags=["에이전트"], dependencies=[Depends(verify_client_key)])
 async def receive_log(body: AgentLogBody) -> dict[str, Any]:
     # 대용량 로그로 인한 오케스트라 DB 부하 방지 (Hybrid Architecture)
     message = body.message if len(body.message) <= 1000 else body.message[:1000] + "...(truncated)"
+    
+    def mask_secrets(text: str) -> str:
+        text = re.sub(r"sk-[a-zA-Z0-9\-]{20,}", "***MASKED***", text) # OpenAI, Anthropic
+        text = re.sub(r"AIza[a-zA-Z0-9\-_]{30,}", "***MASKED***", text) # Google Gemini
+        text = re.sub(r"gh[pous]_[a-zA-Z0-9]{30,}", "***MASKED***", text) # GitHub
+        text = re.sub(r"Bearer\s+[a-zA-Z0-9\-\._~+/]+", "Bearer ***MASKED***", text)
+        return text
+
+    # 민감 정보 마스킹 (API keys, Bearer tokens)
+    message = mask_secrets(message)
+
     payload = body.payload
     
     if payload:
         payload_str = json.dumps(payload, ensure_ascii=False)
+        payload_str = mask_secrets(payload_str)
+        
         if len(payload_str) > 2000:
             payload = {"_truncated_": True, "note": "Payload too large to be stored in central DB."}
+        else:
+            payload = json.loads(payload_str)
             
     await ctx.state_manager.add_agent_log(
         body.agent_name,
@@ -389,38 +484,184 @@ async def receive_log(body: AgentLogBody) -> dict[str, Any]:
 # ── 태스크 엔드포인트 ──────────────────────────────────────────────────────────
 
 
-@app.post("/tasks", tags=["태스크"])
-async def submit_task(body: SubmitTaskBody) -> dict[str, Any]:
+@app.get("/prompts/suggestions", tags=["UX 온보딩"])
+async def get_prompt_suggestions() -> dict[str, Any]:
+    """
+    현재 사용 가능한 에이전트 기능을 기반으로 UI에 표시할 추천 프롬프트를 반환합니다.
+    """
+    available_agents = await ctx.health_monitor.get_available_agents()
+    
+    # 에이전트별 추천 프롬프트 템플릿
+    suggestion_map = {
+        "archive_agent": ["최근 회의록 찾아줘", "데이터베이스 목록 보여줘", "새로운 페이지 작성해줘"],
+        "research_agent": ["최신 AI 트렌드 요약해줘", "파이썬 비동기 처리 방법 조사해줘"],
+        "calendar_agent": ["내일 오후 3시에 회의 일정 추가해줘", "이번 주 내 일정 알려줘"],
+        "file_agent": ["현재 디렉토리 파일 목록 보여줘", "README.md 파일 읽어줘"],
+        "communication_agent": ["슬랙으로 메시지 보내줘", "팀원에게 진행 상황 공유해줘"]
+    }
+    
+    suggestions = [
+        "오늘 날씨 어때?", # 기본 챗봇 프롬프트
+        "간단한 인사말 작성해줘"
+    ]
+    
+    for agent in available_agents:
+        if agent in suggestion_map:
+            # 사용 가능한 에이전트의 추천 프롬프트 중 1개씩 추가
+            suggestions.append(suggestion_map[agent][0])
+            
+    # 최대 5개까지만 반환하도록 제한
+    return {"suggestions": suggestions[:5]}
+
+
+@app.post("/tasks", tags=["태스크"], dependencies=[Depends(verify_client_key)])
+async def submit_task(body: SubmitTaskBody, request: Request) -> dict[str, Any]:
     """사용자 자연어 입력을 NLU로 분석하여 적절한 에이전트에 디스패치합니다."""
+    # ── Rate Limiting ──────────────────────────────────────────────────────────
+    limiter = RateLimiter(ctx.redis_client)
+    allowed, retry_after = await limiter.check(body.user_id)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={**build_error_response("RATE_LIMIT", retry_after=retry_after), "retry_after": retry_after},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # ── Idempotency ────────────────────────────────────────────────────────────
+    idem_key = request.headers.get("X-Idempotency-Key")
+    if idem_key:
+        cached = await ctx.state_manager.get_idempotency_result(idem_key)
+        if cached:
+            return {**cached, "idempotent": True}
+
+    if body.callback_url:
+        try:
+            _validate_callback_url(body.callback_url)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"callback_url 검증 실패: {exc}",
+            )
+
     task_id = str(uuid.uuid4())
     session_id = body.session_id or f"{body.user_id}:{body.channel_id}"
-    task = {
+    task: dict[str, Any] = {
         "task_id": task_id,
         "session_id": session_id,
         "requester": {"user_id": body.user_id, "channel_id": body.channel_id},
         "content": body.content,
         "source": "api",
     }
+    if body.callback_url:
+        task["callback_url"] = body.callback_url
+        # 웹훅 URL을 Redis에 별도 저장 (결과 수신 시 발송용)
+        await ctx.redis_client.setex(
+            f"task:{task_id}:callback_url", 86400, body.callback_url
+        )
+
     await ctx.redis_client.rpush(
-        "agent:orchestra:tasks", json.dumps(task, ensure_ascii=False)
+        "agent:orchestra:tasks", json.dumps(sign_task(task), ensure_ascii=False)
     )
-    return {"status": "accepted", "task_id": task_id, "session_id": session_id}
+
+    # ── 작업 히스토리 저장 ─────────────────────────────────────────────────────
+    await ctx.state_manager.save_task_history(task_id, body.user_id, body.content)
+
+    response = {"status": "accepted", "task_id": task_id, "session_id": session_id}
+
+    if idem_key:
+        await ctx.state_manager.save_idempotency_result(idem_key, response)
+
+    return response
 
 
-@app.get("/tasks/{task_id}", tags=["태스크"])
-async def get_task(task_id: str) -> dict[str, Any]:
+@app.get("/tasks/{task_id}/stream", tags=["태스크"], dependencies=[Depends(verify_client_key)])
+async def stream_task(task_id: str) -> StreamingResponse:
+    """태스크 상태 변경을 SSE(Server-Sent Events)로 실시간 스트리밍합니다.
+
+    UI는 EventSource API로 이 엔드포인트를 구독하면 됩니다.
+    COMPLETED 또는 FAILED 이벤트 수신 후 스트림이 자동 종료됩니다.
+    """
+    async def _event_generator():
+        poll_interval = 1.0
+        max_wait = int(os.environ.get("RESPONSE_TIMEOUT_SEC", "300"))
+        elapsed = 0.0
+        last_status: str | None = None
+
+        while elapsed < max_wait:
+            state = await ctx.state_manager.get_task_state(task_id)
+            current_status = state.get("status", "PROCESSING") if state else "PROCESSING"
+
+            if current_status != last_status:
+                payload = json.dumps(
+                    {"task_id": task_id, "status": current_status, **state},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload}\n\n"
+                last_status = current_status
+
+            if current_status in ("COMPLETED", "FAILED"):
+                break
+
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+        if last_status not in ("COMPLETED", "FAILED"):
+            timeout_payload = json.dumps({
+                "task_id": task_id,
+                "status": "FAILED",
+                "error": get_user_message("TIMEOUT"),
+            }, ensure_ascii=False)
+            yield f"data: {timeout_payload}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/tasks/{task_id}", tags=["태스크"], dependencies=[Depends(verify_client_key)])
+async def get_task(task_id: str, include_logs: bool = Query(False, description="최근 진행 로그 포함 여부")) -> dict[str, Any]:
     state = await ctx.state_manager.get_task_state(task_id)
-    return (
-        {"task_id": task_id, **state}
-        if state
-        else {"task_id": task_id, "status": "NOT_FOUND"}
-    )
+    if not state:
+        return {"task_id": task_id, "status": "NOT_FOUND"}
+        
+    response = {"task_id": task_id, **state}
+    if include_logs:
+        logs = await ctx.state_manager.get_agent_logs(task_id=task_id, limit=5)
+        response["recent_logs"] = logs
+        
+    return response
+
+
+@app.post("/tasks/{task_id}/cancel", tags=["태스크"], dependencies=[Depends(verify_client_key)])
+async def cancel_task(
+    task_id: str,
+    user_id: str = Query(default="api-user", description="취소를 요청하는 사용자 ID"),
+) -> dict[str, Any]:
+    """진행 중인 태스크를 강제로 취소합니다."""
+    try:
+        success = await ctx.manager.cancel_task(task_id, user_id)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="태스크를 취소할 수 없습니다. 이미 완료/실패했거나 존재하지 않습니다."
+        )
+    return {"status": "CANCELLED", "task_id": task_id}
 
 
 # ── NLU 분석 ──────────────────────────────────────────────────────────────────
 
 
-@app.post("/nlu/analyze", tags=["NLU"])
+@app.post("/nlu/analyze", tags=["NLU"], dependencies=[Depends(verify_client_key)])
 async def nlu_analyze(body: NLUAnalyzeBody) -> dict[str, Any]:
     """디스패치 없이 NLU 의도 분석 결과만 반환합니다 (개발·테스트용)."""
     context: list[dict[str, Any]] = []
@@ -442,7 +683,7 @@ async def nlu_analyze(body: NLUAnalyzeBody) -> dict[str, Any]:
 # ── 직접 디스패치 ──────────────────────────────────────────────────────────────
 
 
-@app.post("/dispatch", tags=["태스크"])
+@app.post("/dispatch", tags=["태스크"], dependencies=[Depends(verify_client_key)])
 async def direct_dispatch(body: DirectDispatchBody) -> dict[str, Any]:
     """NLU를 거치지 않고 특정 에이전트에 직접 태스크를 전달합니다."""
     ready, reason = await ctx.health_monitor.is_agent_ready(body.agent_name)
@@ -489,7 +730,8 @@ async def list_agents() -> dict[str, Any]:
     }
 
 
-@app.post("/agents", tags=["에이전트 관리"], status_code=status.HTTP_201_CREATED)
+@app.post("/agents", tags=["에이전트 관리"], status_code=status.HTTP_201_CREATED,
+          dependencies=[Depends(verify_client_key)])
 async def register_agent(body: RegisterAgentBody) -> dict[str, Any]:
     """에이전트 시작 시 자기 등록 엔드포인트."""
     await ctx.health_monitor.register_agent(
@@ -501,7 +743,8 @@ async def register_agent(body: RegisterAgentBody) -> dict[str, Any]:
     return {"status": "registered", "agent_name": body.agent_name}
 
 
-@app.delete("/agents/{agent_name}", tags=["에이전트 관리"])
+@app.delete("/agents/{agent_name}", tags=["에이전트 관리"],
+            dependencies=[Depends(verify_client_key)])
 async def deregister_agent(agent_name: str) -> dict[str, Any]:
     """에이전트 종료 시 자기 해제 엔드포인트."""
     await ctx.redis_client.hdel("agents:registry", agent_name)
@@ -518,7 +761,8 @@ async def get_agent_health(agent_name: str) -> dict[str, Any]:
     return {"agent_name": agent_name, "health": health}
 
 
-@app.put("/agents/{agent_name}/heartbeat", tags=["에이전트 관리"])
+@app.put("/agents/{agent_name}/heartbeat", tags=["에이전트 관리"],
+         dependencies=[Depends(verify_client_key)])
 async def update_heartbeat(agent_name: str, body: HeartbeatBody) -> dict[str, Any]:
     """에이전트 하트비트 갱신 — 에이전트가 주기적으로 호출합니다."""
     mapping: dict[str, str] = {
@@ -550,13 +794,14 @@ async def get_circuit(agent_name: str) -> dict[str, Any]:
     }
 
 
-@app.post("/agents/{agent_name}/reset", tags=["에이전트 관리"])
+@app.post("/agents/{agent_name}/reset", tags=["에이전트 관리"],
+          dependencies=[Depends(verify_client_key)])
 async def reset_circuit(agent_name: str) -> dict[str, Any]:
     await ctx.health_monitor.reset_circuit_breaker(agent_name)
     return {"status": "reset", "agent_name": agent_name}
 
 
-@app.post("/marketplace/install", tags=["에이전트 관리"])
+@app.post("/marketplace/install", tags=["에이전트 관리"], dependencies=[Depends(verify_admin_key)])
 async def install_from_marketplace(body: SubmitMarketplaceInstallBody):
     """외부 마켓플레이스로부터 에이전트를 내려받아 빌드 및 등록합니다."""
     task_id = f"mkt-{str(uuid.uuid4())[:8]}"
@@ -569,13 +814,14 @@ async def install_from_marketplace(body: SubmitMarketplaceInstallBody):
 # ── 세션 엔드포인트 ────────────────────────────────────────────────────────────
 
 
-@app.get("/sessions/{session_id}", tags=["세션"])
+@app.get("/sessions/{session_id}", tags=["세션"], dependencies=[Depends(verify_client_key)])
 async def get_session(session_id: str) -> dict[str, Any]:
     state = await ctx.redis_client.hgetall(f"session:{session_id}:state")
     return {"session_id": session_id, "state": state}
 
 
-@app.get("/sessions/{session_id}/history", tags=["세션"])
+@app.get("/sessions/{session_id}/history", tags=["세션"],
+         dependencies=[Depends(verify_client_key)])
 async def get_session_history(
     session_id: str,
     limit: int = Query(20, ge=1, le=200),
@@ -584,7 +830,7 @@ async def get_session_history(
     return {"session_id": session_id, "count": len(history), "history": history}
 
 
-@app.delete("/sessions/{session_id}", tags=["세션"])
+@app.delete("/sessions/{session_id}", tags=["세션"], dependencies=[Depends(verify_client_key)])
 async def delete_session(session_id: str) -> dict[str, Any]:
     await ctx.state_manager.delete_session(session_id)
     return {"status": "deleted", "session_id": session_id}
@@ -593,12 +839,31 @@ async def delete_session(session_id: str) -> dict[str, Any]:
 # ── 사용자 프로필 ──────────────────────────────────────────────────────────────
 
 
-@app.get("/users/{user_id}/profile", tags=["사용자"])
+@app.get("/users/{user_id}/tasks", tags=["사용자"],
+         dependencies=[Depends(verify_client_key)])
+async def get_user_tasks(
+    user_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    status: str | None = Query(None, description="PENDING|COMPLETED|FAILED 필터"),
+) -> dict[str, Any]:
+    """사용자의 작업 히스토리를 최신순으로 반환합니다."""
+    tasks, total = await ctx.state_manager.get_user_task_history(
+        user_id, limit=limit, offset=offset, status_filter=status
+    )
+    return {"total": total, "limit": limit, "offset": offset, "tasks": tasks}
+
+
+@app.get("/users/{user_id}/profile", tags=["사용자"],
+         dependencies=[Depends(verify_client_key)])
 async def get_profile(user_id: str) -> dict[str, Any]:
-    return await ctx.state_manager.get_user_profile(user_id)
+    profile = await ctx.state_manager.get_user_profile(user_id)
+    profile.pop("llm_keys", None)  # LLM API 키는 공개 프로필 응답에서 제외
+    return profile
 
 
-@app.put("/users/{user_id}/profile", tags=["사용자"])
+@app.put("/users/{user_id}/profile", tags=["사용자"],
+         dependencies=[Depends(verify_client_key)])
 async def update_profile(user_id: str, body: UpdateUserProfileBody) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     if body.name is not None:
@@ -608,10 +873,116 @@ async def update_profile(user_id: str, body: UpdateUserProfileBody) -> dict[str,
     if not updates:
         raise HTTPException(status_code=400, detail="수정할 필드가 없습니다.")
     await ctx.state_manager.update_user_profile(user_id, updates)
-    return await ctx.state_manager.get_user_profile(user_id)
+    profile = await ctx.state_manager.get_user_profile(user_id)
+    profile.pop("llm_keys", None)
+    return profile
+
+
+@app.put("/users/{user_id}/llm_keys/{provider_name}", tags=["사용자"],
+         dependencies=[Depends(verify_client_key)])
+async def update_llm_api_key(
+    user_id: str,
+    provider_name: str,
+    body: LLMKeyUpdateBody
+) -> dict[str, Any]:
+    """
+    사용자의 특정 LLM 제공업체 API 키를 설정하거나 업데이트합니다.
+    """
+    if provider_name not in SUPPORTED_LLM_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid LLM provider '{provider_name}'. Supported providers are: {', '.join(SUPPORTED_LLM_PROVIDERS)}"
+        )
+
+    if not body.api_key or not body.api_key.strip():
+        raise HTTPException(status_code=400, detail="API key must be a non-empty string.")
+
+    profile = await ctx.state_manager.get_user_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+
+    current_keys = profile.get("llm_keys") or {}
+    current_keys[provider_name] = body.api_key
+
+    await ctx.state_manager.update_user_profile(user_id, {"llm_keys": current_keys})
+
+    return {"message": "LLM API key updated successfully."}
+
+
+# ── 승인 API ──────────────────────────────────────────────────────────────────
+
+_APPROVAL_META_PREFIX = "orchestra:approval_meta:"
+_APPROVAL_QUEUE_PREFIX = "orchestra:approval:"
+
+
+@app.get("/approval/{approval_id}", tags=["승인"],
+         dependencies=[Depends(verify_client_key)])
+async def get_approval(approval_id: str) -> dict[str, Any]:
+    """대기 중인 승인 요청 상세 조회.
+
+    UI는 이 엔드포인트를 폴링하거나 SSE로 notification을 받은 뒤 호출합니다.
+    """
+    meta = await ctx.redis_client.hgetall(f"{_APPROVAL_META_PREFIX}{approval_id}")
+    if not meta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"승인 요청 '{approval_id}'을 찾을 수 없습니다.",
+        )
+    return {"approval_id": approval_id, **meta}
+
+
+@app.post("/approval/{approval_id}/respond", tags=["승인"],
+          dependencies=[Depends(verify_client_key)])
+async def respond_approval(approval_id: str, body: ApprovalRespondBody) -> dict[str, Any]:
+    """승인 요청에 응답합니다 (approve / reject).
+
+    매니저의 request_user_approval()이 대기 중인 Redis 키에 결과를 push합니다.
+    """
+    meta = await ctx.redis_client.hgetall(f"{_APPROVAL_META_PREFIX}{approval_id}")
+    if not meta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"승인 요청 '{approval_id}'을 찾을 수 없습니다.",
+        )
+
+    current_status = meta.get("status", "PENDING")
+    if current_status != "PENDING":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"이미 처리된 승인 요청입니다 (상태: {current_status}).",
+        )
+
+    # 승인 결과를 매니저가 BLPOP 대기 중인 큐에 push
+    decision = json.dumps({"action": body.action}, ensure_ascii=False)
+    await ctx.redis_client.rpush(f"{_APPROVAL_QUEUE_PREFIX}{approval_id}", decision)
+
+    # 메타 상태 업데이트
+    new_status = "APPROVED" if body.action == "approve" else "REJECTED"
+    await ctx.redis_client.hset(
+        f"{_APPROVAL_META_PREFIX}{approval_id}", "status", new_status
+    )
+
+    return {
+        "approval_id": approval_id,
+        "action": body.action,
+        "status": new_status,
+    }
 
 
 # ── 진입점 ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import argparse
+    parser = argparse.ArgumentParser(description="Orchestra Agent Server")
+    parser.add_argument(
+        "--llm",
+        type=str,
+        choices=["gemini", "claude", "chatgpt", "local"],
+        default="gemini",
+        help="LLM Backend to use (default: gemini)"
+    )
+    args = parser.parse_args()
+    
+    os.environ["LLM_BACKEND"] = args.llm
+    
+    uvicorn.run("agents.orchestra_agent.main:app", host="0.0.0.0", port=49152, reload=False)

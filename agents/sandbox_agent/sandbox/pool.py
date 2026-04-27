@@ -124,9 +124,12 @@ class VMPool:
             from .firecracker import FirecrackerSandbox
             vm = FirecrackerSandbox()
             await vm.start()
+        elif self._runtime == "gvisor":
+            from .docker_sandbox import DockerSandbox
+            vm = DockerSandbox(use_gvisor=True)
         else:
             from .docker_sandbox import DockerSandbox
-            vm = DockerSandbox()
+            vm = DockerSandbox(use_gvisor=False)
         return vm  # type: ignore[return-value]
 
     async def _create_and_enqueue(self) -> None:

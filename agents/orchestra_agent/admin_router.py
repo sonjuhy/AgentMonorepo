@@ -54,16 +54,22 @@ Orchestra Agent 관리자 API 라우터  (GUI 외부 제어 전용)
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field, field_validator
 
 from .app_context import ctx
+from .auth import verify_admin_key
 
-router = APIRouter(prefix="/admin", tags=["관리자 (Admin)"])
+router = APIRouter(
+    prefix="/admin", 
+    tags=["관리자 (Admin)"], 
+    dependencies=[Depends(verify_admin_key)]
+)
 
 # ── 권한 프리셋 정의 ───────────────────────────────────────────────────────────
 # AGENT_CONTAINER_MANAGEMENT.md §4 권한 부여 기반
@@ -116,6 +122,9 @@ _CB_THRESHOLD = 3  # health_monitor와 동일 값
 
 # ── Request 모델 ──────────────────────────────────────────────────────────────
 
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
 class RegisterAgentBody(BaseModel):
     agent_name: str = Field(..., description="에이전트 고유 이름 (예: my_agent)")
     capabilities: list[str] = Field(default_factory=list, description="에이전트 액션 목록")
@@ -126,6 +135,15 @@ class RegisterAgentBody(BaseModel):
         None,
         description="LLM 접근 허용 여부. None이면 프리셋 기본값 사용",
     )
+
+    @field_validator("agent_name")
+    @classmethod
+    def validate_agent_name(cls, v: str) -> str:
+        if not _AGENT_NAME_RE.match(v):
+            raise ValueError(
+                "agent_name은 영문자·숫자·언더스코어만 허용되며 1~64자여야 합니다."
+            )
+        return v
 
 
 class SetPermissionsBody(BaseModel):
@@ -151,6 +169,14 @@ class BroadcastBody(BaseModel):
         default_factory=list,
         description="대상 에이전트 목록. 비어있으면 전체 에이전트에 전송",
     )
+
+
+class DLQReplayBody(BaseModel):
+    task_id: str = Field(..., description="재처리할 태스크 ID")
+
+
+class SandboxKeyGenerateBody(BaseModel):
+    label: str = Field(..., description="키 식별을 위한 라벨 (예: 'prod-orchestra')")
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────────────
@@ -840,4 +866,147 @@ async def broadcast_message(body: BroadcastBody) -> dict[str, Any]:
         "target_count": len(pushed),
         "targets": pushed,
         "message_preview": body.message[:100],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DLQ 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+_DLQ_KEY = "orchestra:dlq"
+_ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
+
+
+@router.get("/dlq", summary="DLQ 항목 목록 조회")
+async def list_dlq(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Dead Letter Queue에 쌓인 실패 태스크 목록을 반환합니다."""
+    total = await ctx.redis_client.llen(_DLQ_KEY)
+    raw_items = await ctx.redis_client.lrange(_DLQ_KEY, offset, offset + limit - 1)
+
+    items: list[dict[str, Any]] = []
+    for raw in raw_items:
+        try:
+            items.append(json.loads(raw))
+        except Exception:
+            items.append({"raw": raw[:200]})
+
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.post("/dlq/replay", summary="DLQ 태스크 재처리")
+async def replay_dlq_task(body: DLQReplayBody) -> dict[str, Any]:
+    """DLQ에서 특정 task_id 항목을 찾아 오케스트라 큐로 재삽입합니다."""
+    total = await ctx.redis_client.llen(_DLQ_KEY)
+    raw_items = await ctx.redis_client.lrange(_DLQ_KEY, 0, total - 1)
+
+    target_raw: str | None = None
+    target_entry: dict[str, Any] | None = None
+
+    for raw in raw_items:
+        try:
+            entry = json.loads(raw)
+            if entry.get("task_id") == body.task_id:
+                target_raw = raw
+                target_entry = entry
+                break
+        except Exception:
+            continue
+
+    if target_entry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"DLQ에서 task_id='{body.task_id}'를 찾을 수 없습니다.",
+        )
+
+    # 재처리를 위해 오케스트라 태스크 큐에 재삽입
+    replay_task = {
+        "task_id": target_entry.get("task_id"),
+        "session_id": target_entry.get("session_id", "dlq-replay"),
+        "requester": target_entry.get("requester", {"user_id": "admin", "channel_id": "dlq"}),
+        "content": target_entry.get("content", ""),
+        "source": "dlq_replay",
+        "replayed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await ctx.redis_client.rpush(_ORCHESTRA_TASKS_KEY, json.dumps(replay_task, ensure_ascii=False))
+
+    # DLQ에서 해당 항목 제거 (lrem: 첫 번째 일치 항목 1개 제거)
+    if target_raw:
+        await ctx.redis_client.lrem(_DLQ_KEY, 1, target_raw)
+
+    return {"replayed": 1, "task_id": body.task_id}
+
+
+@router.delete("/dlq", summary="DLQ 전체 비우기")
+async def clear_dlq() -> dict[str, Any]:
+    """Dead Letter Queue 전체를 삭제합니다."""
+    count = await ctx.redis_client.llen(_DLQ_KEY)
+    if count > 0:
+        await ctx.redis_client.delete(_DLQ_KEY)
+    return {"cleared": count, "message": f"DLQ에서 {count}개 항목이 삭제되었습니다."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 샌드박스 키 관리
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SANDBOX_KEYS_HASH = "sandbox:keys"
+
+
+@router.get("/sandbox/keys", summary="샌드박스 API 키 목록 조회")
+async def list_sandbox_keys() -> dict[str, Any]:
+    """등록된 모든 샌드박스 API 키와 라벨 목록을 반환합니다."""
+    keys = await ctx.redis_client.hgetall(_SANDBOX_KEYS_HASH)
+    # 보안을 위해 키의 앞부분만 노출 (마스킹)
+    masked_keys = {
+        k[:8] + "..." + k[-4:]: label 
+        for k, label in keys.items()
+    }
+    return {
+        "total": len(keys),
+        "keys": masked_keys,
+        "raw_keys_count": len(keys)
+    }
+
+
+@router.post("/sandbox/keys", status_code=status.HTTP_201_CREATED, summary="샌드박스 API 키 생성")
+async def generate_sandbox_key(body: SandboxKeyGenerateBody) -> dict[str, Any]:
+    """새로운 무작위 샌드박스 API 키를 생성하고 저장합니다."""
+    import secrets
+    new_key = secrets.token_hex(32)
+    
+    await ctx.redis_client.hset(_SANDBOX_KEYS_HASH, new_key, body.label)
+    
+    return {
+        "status": "created",
+        "label": body.label,
+        "key": new_key,
+        "note": "이 키는 다시 조회할 수 없으므로 안전한 곳에 저장하세요."
+    }
+
+
+@router.delete("/sandbox/keys/{key_prefix}", summary="샌드박스 API 키 삭제")
+async def delete_sandbox_key(key_prefix: str) -> dict[str, Any]:
+    """마스킹된 키 프리픽스(앞 8자리)를 기반으로 해당 키를 삭제합니다."""
+    all_keys = await ctx.redis_client.hkeys(_SANDBOX_KEYS_HASH)
+    
+    target_key: str | None = None
+    for k in all_keys:
+        if k.startswith(key_prefix):
+            target_key = k
+            break
+            
+    if not target_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"프리픽스 '{key_prefix}'로 시작하는 키를 찾을 수 없습니다."
+        )
+        
+    await ctx.redis_client.hdel(_SANDBOX_KEYS_HASH, target_key)
+    
+    return {
+        "status": "deleted",
+        "deleted_prefix": key_prefix
     }

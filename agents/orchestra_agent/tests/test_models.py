@@ -166,25 +166,25 @@ class TestDirectResponseNLUResult:
 
 class TestAgentTimeoutMap:
     def test_default_values(self):
-        assert AGENT_TIMEOUT_MAP["coding_agent"] == 600
+        assert AGENT_TIMEOUT_MAP["archive_agent"] == 300
         assert AGENT_TIMEOUT_MAP["calendar_agent"] == 60
 
     def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("AGENT_TIMEOUT_OVERRIDES", "coding_agent:900,file_agent:180")
+        monkeypatch.setenv("AGENT_TIMEOUT_OVERRIDES", "archive_agent:900,file_agent:180")
         result = _build_timeout_map()
-        assert result["coding_agent"] == 900
+        assert result["archive_agent"] == 900
         assert result["file_agent"] == 180
         assert result["calendar_agent"] == 60  # unchanged
 
     def test_env_override_invalid_value_ignored(self, monkeypatch):
-        monkeypatch.setenv("AGENT_TIMEOUT_OVERRIDES", "coding_agent:notanumber")
+        monkeypatch.setenv("AGENT_TIMEOUT_OVERRIDES", "archive_agent:notanumber")
         result = _build_timeout_map()
-        assert result["coding_agent"] == 600  # unchanged
+        assert result["archive_agent"] == 300  # unchanged
 
     def test_env_override_empty(self, monkeypatch):
         monkeypatch.setenv("AGENT_TIMEOUT_OVERRIDES", "")
         result = _build_timeout_map()
-        assert result["coding_agent"] == 600
+        assert result["archive_agent"] == 300
 
 
 # ── NLU_CONFIDENCE_THRESHOLD ──────────────────────────────────────────────────

@@ -1,6 +1,129 @@
 services:
 
   # ─────────────────────────────────────────────
+  # 인프라: Redis 메시지 브로커
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 에이전트 간 내부 통신용으로만 사용 (호스트 노출 차단)
+    environment:
+      - REDIS_ORCHESTRA_PASSWORD=${REDIS_ORCHESTRA_PASSWORD}
+      - REDIS_COMMUNITY_PASSWORD=${REDIS_COMMUNITY_PASSWORD}
+    volumes:
+      - redis_data:/data
+      - ./redis/acl.conf:/etc/redis/acl.conf.tpl:ro
+      - ./redis/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    healthcheck:
+      # ACL 적용 후 orchestra 계정으로 ping 확인
+      test: ["CMD", "redis-cli", "-u", "redis://orchestra:${REDIS_ORCHESTRA_PASSWORD}@localhost:6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # 인프라: Ollama LLM 서버 (Linux GPU 환경 전용)
+  # Mac/Windows: Ollama를 네이티브로 설치 후 OLLAMA_BASE_URL=http://host.docker.internal:11434 설정
+  # Linux GPU: --profile local-llm 으로 활성화
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    profiles:
+      - local-llm
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ─────────────────────────────────────────────
+  # Orchestra Agent: NLU + 에이전트 디스패치 허브
+  # ─────────────────────────────────────────────
+  orchestra_agent:
+    build:
+      context: .
+      dockerfile: agents/orchestra_agent/Dockerfile
+    image: agentmonorepo-orchestra_agent
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${ORCHESTRA_PORT:-49152}:49152"
+    environment:
+      # orchestra 계정 사용 (전체 접근 권한)
+      - REDIS_URL=redis://orchestra:${REDIS_ORCHESTRA_PASSWORD}@redis:6379
+      # 커뮤니티 에이전트에 전달할 제한된 Redis URL (community 계정)
+      - REDIS_COMMUNITY_URL=redis://community:${REDIS_COMMUNITY_PASSWORD}@redis:6379
+      # LLM 백엔드: gemini | claude | local
+      - LLM_BACKEND=${LLM_BACKEND:-gemini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # 로컬 LLM (Ollama) 설정
+      # Mac/Windows: http://host.docker.internal:11434/v1
+      # Linux (ollama 서비스 사용 시): http://ollama:11434/v1
+      - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-llama3.2}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_READY_TIMEOUT=${OLLAMA_READY_TIMEOUT:-120}
+      # NLU 파라미터
+      - NLU_CONFIDENCE_THRESHOLD=${NLU_CONFIDENCE_THRESHOLD:-0.7}
+      - NLU_LLM_MODEL=${NLU_LLM_MODEL:-gemini-2.0-flash}
+      - NLU_LLM_TEMPERATURE=${NLU_LLM_TEMPERATURE:-0.2}
+      # 타임아웃 / Circuit Breaker
+      - RESPONSE_TIMEOUT_SEC=${RESPONSE_TIMEOUT_SEC:-30.0}
+      - CB_THRESHOLD=${CB_THRESHOLD:-3}
+      - CB_WINDOW_SEC=${CB_WINDOW_SEC:-300}
+      - HEARTBEAT_VALID_SEC=${HEARTBEAT_VALID_SEC:-30}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      # API 인증 키 (필수 — 미설정 시 서비스 시작 불가)
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - CLIENT_API_KEY=${CLIENT_API_KEY}
+      # dispatch 메시지 HMAC 서명 키 (권장 — 미설정 시 서명 생략)
+      - DISPATCH_HMAC_SECRET=${DISPATCH_HMAC_SECRET}
+      # Redis 비밀번호 (필수 — orchestra 계정용)
+      - REDIS_ORCHESTRA_PASSWORD=${REDIS_ORCHESTRA_PASSWORD}
+      - REDIS_COMMUNITY_PASSWORD=${REDIS_COMMUNITY_PASSWORD}
+      # SandboxTool — 운영 모드 선택 (remote | ephemeral | disabled)
+      - SANDBOX_MODE=${SANDBOX_MODE:-remote}
+      - SANDBOX_URL=http://sandbox_agent:8003
+      - SANDBOX_API_KEY=${SANDBOX_API_KEY}
+      - SANDBOX_IMAGE=agentmonorepo-sandbox_agent
+      - SANDBOX_RUNTIME=${SANDBOX_RUNTIME:-docker}
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock  # 보안 강화를 위해 제거 (ephemeral 모드 사용 시 필요)
+
+  # ─────────────────────────────────────────────
+  # Sandbox Agent: 격리된 코드 실행 전용 에이전트
+  # ─────────────────────────────────────────────
+  sandbox_agent:
+    build:
+      context: .
+      dockerfile: agents/sandbox_agent/Dockerfile
+    image: agentmonorepo-sandbox_agent
+    restart: unless-stopped
+    profiles:
+      - sandbox  # --profile sandbox 로 명시적 가동 가능
+    environment:
+      - SANDBOX_MODE=server
+      - SANDBOX_API_KEY=${SANDBOX_API_KEY}
+      - REDIS_URL=redis://sandbox:${REDIS_COMMUNITY_PASSWORD}@redis:6379
+      - SANDBOX_RUNTIME=${SANDBOX_RUNTIME:-docker}
+      - VM_POOL_MIN_READY=${VM_POOL_MIN_READY:-2}
+      - VM_POOL_MAX_SIZE=${VM_POOL_MAX_SIZE:-10}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 에이전트 간 내부 통신용으로만 사용 (호스트 노출 차단)
+
+  # ─────────────────────────────────────────────
   # 장기 실행: Slack 메시지 수신 → LLM 분류 → 에이전트 디스패치
   # ─────────────────────────────────────────────
   slack_listener:
@@ -32,6 +155,8 @@ services:
       # 에이전트 이미지 이름 재정의 (선택)
       - AGENT_IMAGE_PLANNING_AGENT=${AGENT_IMAGE_PLANNING_AGENT:-agentmonorepo-planning_agent}
       - AGENT_IMAGE_SLACK_AGENT=${AGENT_IMAGE_SLACK_AGENT:-agentmonorepo-slack_agent}
+      # dispatch 메시지 HMAC 서명 키 (orchestra_agent와 동일한 값 사용)
+      - DISPATCH_HMAC_SECRET=${DISPATCH_HMAC_SECRET}
     volumes:
       # DooD(Docker-outside-of-Docker): 에이전트 컨테이너 실행을 위해 호스트 소켓 마운트
       - /var/run/docker.sock:/var/run/docker.sock
@@ -76,3 +201,7 @@ services:
       - SLACK_MESSAGE_CHANNEL
       - SLACK_MESSAGE_TS
       - SLACK_MESSAGE_THREAD_TS
+
+volumes:
+  redis_data:
+  ollama_data:

@@ -24,42 +24,39 @@ import pytest_asyncio
 # ── SandboxTool 픽스처 ────────────────────────────────────────────────────────
 
 @pytest.fixture
-def mock_pool():
-    pool = AsyncMock()
-    # stats()는 동기 메서드 → MagicMock으로 교체
-    pool.stats = MagicMock(return_value={"ready_count": 3, "active_count": 0, "max_size": 10, "runtime": "docker"})
-    return pool
+def mock_client():
+    client = AsyncMock()
+    # health()는 기본적으로 성공한다고 가정
+    client.health.return_value = {"status": "ok"}
+    return client
 
 
 @pytest.fixture
-def sandbox_tool(mock_pool):
-    with patch("agents.orchestra_agent.sandbox_tool.VMPool", return_value=mock_pool):
+def sandbox_tool(mock_client):
+    with patch("agents.orchestra_agent.sandbox_tool.SandboxClient", return_value=mock_client):
         from agents.orchestra_agent.sandbox_tool import SandboxTool
         tool = SandboxTool()
-        tool._pool = mock_pool
+        # __init__에서 생성된 _client를 mock으로 교체
+        tool._client = mock_client
         return tool
 
 
-def _make_vm(stdout="Hello", stderr="", exit_code=0, runtime="docker", time_ms=50):
-    vm = AsyncMock()
-    vm.vm_id = "test-vm-id"
-    vm.execute.return_value = {
+def _make_result(stdout="Hello", stderr="", exit_code=0, runtime="docker", time_ms=50):
+    # SandboxResult는 TypedDict이므로 dict와 유사한 구조
+    return {
         "stdout": stdout,
         "stderr": stderr,
         "exit_code": exit_code,
         "runtime_used": runtime,
         "execution_time_ms": time_ms,
     }
-    return vm
 
 
 # ── SandboxTool.execute_code ──────────────────────────────────────────────────
 
 class TestSandboxToolExecuteCode:
-    async def test_success_returns_result(self, sandbox_tool, mock_pool):
-        vm = _make_vm(stdout="42\n")
-        mock_pool.acquire = AsyncMock(return_value=vm)
-        mock_pool.release = AsyncMock()
+    async def test_success_returns_result(self, sandbox_tool, mock_client):
+        mock_client.execute.return_value = _make_result(stdout="42\n")
 
         result = await sandbox_tool.execute_code({"language": "python", "code": "print(42)"})
 
@@ -76,78 +73,53 @@ class TestSandboxToolExecuteCode:
         with pytest.raises(ValueError, match="'language'"):
             await sandbox_tool.execute_code({"code": "print(1)"})
 
-    async def test_release_called_on_success(self, sandbox_tool, mock_pool):
-        vm = _make_vm()
-        mock_pool.acquire = AsyncMock(return_value=vm)
-        mock_pool.release = AsyncMock()
+    async def test_remote_error_raises_runtime_error(self, sandbox_tool, mock_client):
+        from shared_core.sandbox.client import SandboxError
+        mock_client.execute.side_effect = SandboxError("연결 실패")
 
-        await sandbox_tool.execute_code({"language": "python", "code": "print(1)"})
+        with pytest.raises(RuntimeError, match="샌드박스 실행 오류"):
+            await sandbox_tool.execute_code({"language": "python", "code": "print(1)"})
 
-        mock_pool.release.assert_called_once_with(vm)
-
-    async def test_release_called_on_vm_error(self, sandbox_tool, mock_pool):
-        vm = _make_vm()
-        vm.execute.side_effect = RuntimeError("VM 충돌")
-        mock_pool.acquire = AsyncMock(return_value=vm)
-        mock_pool.release = AsyncMock()
-
-        with pytest.raises(RuntimeError, match="VM 충돌"):
-            await sandbox_tool.execute_code({"language": "python", "code": "crash"})
-
-        mock_pool.release.assert_called_once_with(vm)
-
-    async def test_optional_params_defaults(self, sandbox_tool, mock_pool):
-        vm = _make_vm()
-        mock_pool.acquire = AsyncMock(return_value=vm)
-        mock_pool.release = AsyncMock()
-
-        await sandbox_tool.execute_code({"language": "python", "code": "pass"})
-
-        req_arg = vm.execute.call_args[0][0]
-        assert req_arg.timeout == 30
-        assert req_arg.memory_mb == 256
-        assert req_arg.stdin == ""
-        assert req_arg.env == {}
-
-    async def test_custom_params_forwarded(self, sandbox_tool, mock_pool):
-        vm = _make_vm()
-        mock_pool.acquire = AsyncMock(return_value=vm)
-        mock_pool.release = AsyncMock()
-
+    async def test_optional_params_passed_to_client(self, sandbox_tool, mock_client):
+        mock_client.execute.return_value = _make_result()
+        
         await sandbox_tool.execute_code({
-            "language": "python",
-            "code": "pass",
-            "timeout": 60,
-            "memory_mb": 512,
+            "language": "javascript",
+            "code": "console.log(1)",
             "stdin": "input",
-            "env": {"KEY": "VAL"},
+            "timeout": 10,
+            "memory_mb": 512,
+            "env": {"KEY": "VAL"}
         })
 
-        req_arg = vm.execute.call_args[0][0]
-        assert req_arg.timeout == 60
-        assert req_arg.memory_mb == 512
-        assert req_arg.stdin == "input"
-        assert req_arg.env == {"KEY": "VAL"}
+        mock_client.execute.assert_called_once_with(
+            language="javascript",
+            code="console.log(1)",
+            stdin="input",
+            timeout=10,
+            memory_mb=512,
+            env={"KEY": "VAL"}
+        )
 
 
 # ── SandboxTool lifecycle ────────────────────────────────────────────────────
 
 class TestSandboxToolLifecycle:
-    async def test_start_calls_pool_start(self, sandbox_tool, mock_pool):
+    async def test_start_calls_health_check(self, sandbox_tool, mock_client):
         await sandbox_tool.start()
-        mock_pool.start.assert_awaited_once()
+        mock_client.health.assert_called_once()
 
-    async def test_shutdown_calls_pool_shutdown(self, sandbox_tool, mock_pool):
+    async def test_shutdown_is_noop(self, sandbox_tool, mock_client):
+        # 종료 시 원격 클라이언트는 특별한 동작을 하지 않음
         await sandbox_tool.shutdown()
-        mock_pool.shutdown.assert_awaited_once()
 
-    def test_pool_stats_delegates_to_pool(self, sandbox_tool, mock_pool):
+    def test_pool_stats_returns_remote_info(self, sandbox_tool):
         stats = sandbox_tool.pool_stats()
-        assert stats["ready_count"] == 3
-        mock_pool.stats.assert_called_once()
+        assert stats["status"] == "remote"
+        assert "url" in stats
 
     def test_runtime_property(self, sandbox_tool):
-        assert sandbox_tool.runtime in ("docker", "firecracker")
+        assert sandbox_tool.runtime == "remote"
 
 
 # ── OrchestraManager + SandboxTool 통합 픽스처 ───────────────────────────────
@@ -314,7 +286,11 @@ class TestExecuteAgentTask:
 
 class TestRouteSingleSandboxBypass:
     async def test_sandbox_skips_health_check(self, manager_with_sandbox, sandbox_tool_mock, fake_redis):
-        """sandbox_agent가 레지스트리에 없어도 (헬스체크 미통과) 직접 실행되어야 함."""
+        """sandbox_agent가 레지스트리에 없어도 (헬스체크 미통과) 직접 실행되어야 함.
+
+        execute_code 는 APPROVAL_REQUIRED_ACTIONS 에 포함되므로 request_user_approval 을
+        mock 처리해 즉시 승인 처리한다. 테스트의 핵심은 '헬스체크 없이 sandbox_tool 이 호출됨' 여부.
+        """
         from agents.orchestra_agent.models import NLUMetadata, SingleNLUResult
 
         nlu_result = SingleNLUResult(
@@ -333,6 +309,10 @@ class TestRouteSingleSandboxBypass:
             "content": "파이썬 실행",
             "source": "api",
         }
+
+        # execute_code 는 서버사이드 강제 승인 대상이므로 request_user_approval 을 자동 승인으로 패치
+        from unittest.mock import AsyncMock
+        manager_with_sandbox.request_user_approval = AsyncMock(return_value=True)
 
         # sandbox_agent를 레지스트리에 등록하지 않음 → 일반 에이전트라면 NOT_FOUND 오류
         await manager_with_sandbox._route_single(nlu_result, _BASE_TASK)

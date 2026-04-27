@@ -42,13 +42,12 @@ from .dispatcher import DockerDispatcher
 from .llm_classifier import ClassifierProtocol
 from .redis_broker import RedisBroker
 
+from shared_core.agent_logger import setup_logging
+
 logger = logging.getLogger("slack_agent.fastapi_app")
 
-if not logging.root.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+# 보안 마스킹 필터가 적용된 로깅 설정 활성화
+setup_logging()
 
 _MAX_RECENT_MESSAGES = 100
 

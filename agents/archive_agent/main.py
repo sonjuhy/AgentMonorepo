@@ -18,10 +18,11 @@ from dotenv import load_dotenv
 
 load_dotenv(encoding="utf-8", override=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+from shared_core.agent_logger import setup_logging
+
+# 보안 마스킹 필터가 적용된 로깅 설정 활성화
+setup_logging()
+
 logger = logging.getLogger("archive_agent.main")
 
 

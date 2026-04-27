@@ -7,8 +7,12 @@ MarketplaceHandler — 외부 마켓플레이스 에이전트 설치 관리자
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
+import socket
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -19,6 +23,101 @@ if TYPE_CHECKING:
     from .health_monitor import HealthMonitor
 
 logger = logging.getLogger("orchestra_agent.marketplace_handler")
+
+# 허용되는 에이전트 이름 패턴: 알파벳·숫자·언더스코어, 최대 64자
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+# 허용되는 패키지 이름 패턴: PyPI 사양 (패키지명, 버전 스펙 포함)
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+([><=!~^]{1,2}[A-Za-z0-9_\-\.\*]+)?$")
+_MAX_CODE_BYTES = 512 * 1024  # 512 KB
+_MAX_PACKAGES = 20
+_VALID_PERMISSION_PRESETS = frozenset({"minimal", "standard", "trusted"})
+
+
+def _validate_manifest(manifest: dict[str, Any]) -> None:
+    """마켓플레이스 매니페스트 입력값을 서버사이드에서 검증한다.
+
+    유효하지 않은 값이 있으면 ValueError 를 발생시킨다.
+    """
+    # name 검증
+    name = str(manifest.get("name", "")).strip()
+    if not name:
+        raise ValueError("매니페스트 name 필드가 비어 있습니다.")
+    if not _AGENT_NAME_RE.match(name):
+        raise ValueError(
+            f"매니페스트 name 은 영문·숫자·언더스코어 1~64자여야 합니다: {name!r}"
+        )
+
+    # code 검증
+    code = str(manifest.get("code", "")).strip()
+    if not code:
+        raise ValueError("매니페스트 code 필드가 비어 있습니다.")
+    if len(code.encode("utf-8")) > _MAX_CODE_BYTES:
+        raise ValueError(
+            f"매니페스트 code 크기가 허용 한도({_MAX_CODE_BYTES // 1024} KB)를 초과합니다."
+        )
+
+    # packages 검증
+    packages: list[Any] = manifest.get("packages") or []
+    if len(packages) > _MAX_PACKAGES:
+        raise ValueError(
+            f"packages 목록은 최대 {_MAX_PACKAGES}개까지 허용됩니다. (현재: {len(packages)})"
+        )
+    for pkg in packages:
+        pkg_str = str(pkg).strip()
+        if not _PACKAGE_NAME_RE.match(pkg_str):
+            raise ValueError(
+                f"packages 항목에 허용되지 않은 문자가 포함되어 있습니다: {pkg_str!r}"
+            )
+
+    # permissions 검증 (선택 필드)
+    permissions = manifest.get("permissions")
+    if permissions is not None and permissions not in _VALID_PERMISSION_PRESETS:
+        raise ValueError(
+            f"permissions 은 {sorted(_VALID_PERMISSION_PRESETS)} 중 하나여야 합니다: {permissions!r}"
+        )
+
+
+def _validate_marketplace_url(url: str) -> tuple[str, str, str]:
+    """
+    SSRF 방어: 내부망·루프백·링크로컬 주소로의 요청을 차단합니다.
+    허용 스킴: https, http (내부 IP 아닌 경우에 한함)
+    반환: (resolved_ip, original_hostname, modified_url_with_ip)
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"허용되지 않은 URL 스킴: '{parsed.scheme}'. https 또는 http만 허용됩니다.")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL에 호스트가 없습니다.")
+
+    # DNS 해석 후 실제 IP로 검사 (DNS rebinding 방어)
+    try:
+        resolved_ip = socket.gethostbyname(hostname)
+    except socket.gaierror as e:
+        raise ValueError(f"호스트를 해석할 수 없습니다: {hostname} — {e}")
+
+    addr = ipaddress.ip_address(resolved_ip)
+    if (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    ):
+        raise ValueError(
+            f"내부 또는 예약된 IP 주소로의 요청은 허용되지 않습니다: {resolved_ip}"
+        )
+        
+    # DNS Rebinding 방어를 위해 IP 주소 기반 URL 생성
+    # Host 헤더는 원본 호스트 유지 필요
+    netloc = resolved_ip
+    if parsed.port:
+        netloc = f"{resolved_ip}:{parsed.port}"
+        
+    modified_url = parsed._replace(netloc=netloc).geturl()
+    return resolved_ip, hostname, modified_url
 
 
 class MarketplaceHandler:
@@ -51,26 +150,27 @@ class MarketplaceHandler:
         logger.info("[Marketplace] 설치 시도: %s", item_url)
 
         try:
-            # 1. 마켓플레이스로부터 매니페스트(명세) 가져오기
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(item_url)
+            # 1. SSRF 방어: 내부망 URL 차단 및 DNS Rebinding 방어를 위해 IP 확인
+            resolved_ip, original_hostname, safe_url = _validate_marketplace_url(item_url)
+
+            # 2. 마켓플레이스로부터 매니페스트(명세) 가져오기 (IP 주소 사용 및 Host 헤더 전달)
+            headers = {"Host": original_hostname}
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+                resp = await client.get(safe_url, headers=headers)
                 resp.raise_for_status()
                 manifest: dict[str, Any] = resp.json()
 
-            agent_name = manifest.get("name", "").strip()
-            if not agent_name:
-                raise ValueError("매니페스트에 에이전트 이름(name)이 누락되었습니다.")
+            # 3. 매니페스트 입력값 검증 (이름 패턴, 코드 크기, 패키지 안전성)
+            _validate_manifest(manifest)
+            agent_name = manifest["name"].strip()
 
-            if not manifest.get("code", "").strip():
-                raise ValueError("매니페스트에 실행 코드(code)가 누락되었습니다.")
-
-            # 2. 에이전트 빌드 실행
+            # 4. 에이전트 빌드 실행
             build_result = await self.builder.build_agent(manifest, task_id)
 
             if build_result.get("status") == "FAILED":
                 return build_result
 
-            # 3. 레지스트리 등록 — 인메모리(AgentRegistry) + Redis(HealthMonitor)
+            # 5. 레지스트리 등록 — 인메모리(AgentRegistry) + Redis(HealthMonitor)
             registered_name = f"{agent_name}_agent"
             capability_desc = manifest.get("description", f"{agent_name} 에이전트")
             capabilities: list[str] = manifest.get("capabilities") or []

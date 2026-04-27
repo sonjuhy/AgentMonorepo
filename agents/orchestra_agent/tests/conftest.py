@@ -21,6 +21,23 @@ os.environ.setdefault("LLM_BACKEND", "gemini")
 os.environ.setdefault("GEMINI_API_KEY", "test-key")
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("CLIENT_API_KEY", "test-client-key")
+# Fernet 키: 테스트 전용 고정값 (URL-safe base64, cryptography.fernet.Fernet 규격)
+os.environ.setdefault("ENCRYPTION_KEY", "sjbWLtj1X4WskngsFoQj-21Bx37TgszKXX0b2vlQhHY=")
+
+_TEST_ADMIN_KEY = "test-admin-key"
+_TEST_CLIENT_KEY = "test-client-key"
+
+
+# main.py에서 load_dotenv(override=True)가 .env 값으로 덮어쓰는 것을 방지하기 위해
+# auth 모듈의 키 변수를 테스트 키로 고정합니다.
+@pytest.fixture(autouse=True)
+def _patch_auth_keys(monkeypatch):
+    try:
+        import agents.orchestra_agent.auth as auth_module
+        monkeypatch.setattr(auth_module, "ADMIN_API_KEY", _TEST_ADMIN_KEY)
+        monkeypatch.setattr(auth_module, "CLIENT_API_KEY", _TEST_CLIENT_KEY)
+    except Exception:
+        pass
 
 
 # ── Redis ────────────────────────────────────────────────────────────────────

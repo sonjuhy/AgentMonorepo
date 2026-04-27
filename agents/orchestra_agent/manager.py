@@ -18,7 +18,9 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from .auth import CLIENT_API_KEY
 from .health_monitor import HealthMonitor
+from shared_core.dispatch_auth import DispatchAuthError, verify_task
 from .sandbox_tool import SandboxTool
 from .scheduler import ScheduledTaskRunner
 from .models import (
@@ -38,6 +40,36 @@ from .nlu_engine import GeminiNLUEngine, build_nlu_engine
 from .state_manager import StateManager
 
 logger = logging.getLogger("orchestra_agent.manager")
+
+# 액션 화이트리스트: LLM 판단과 무관하게 서버가 강제로 사용자 승인을 요구하는 액션 목록.
+# 되돌리기 어려운(파괴적) 작업만 포함한다.
+APPROVAL_REQUIRED_ACTIONS: frozenset[str] = frozenset({
+    # 파일 시스템
+    "delete_file",
+    "write_file",
+    "overwrite_file",
+    # 코드 실행
+    "execute_code",
+    "run_code",
+    "execute_tdd_cycle",
+    # 캘린더 변경
+    "add_schedule",
+    "modify_schedule",
+    "remove_schedule",
+    # 커뮤니케이션 발송
+    "send_message",
+    "send_email",
+})
+
+
+def _requires_approval(action: str, llm_flag: bool) -> bool:
+    """서버사이드 승인 여부 결정.
+
+    action 이 APPROVAL_REQUIRED_ACTIONS 에 있으면 LLM 판단과 무관하게 True 를 반환한다.
+    그렇지 않으면 LLM 의 llm_flag 를 그대로 따른다.
+    """
+    return action in APPROVAL_REQUIRED_ACTIONS or llm_flag
+
 
 # Redis 설정
 _ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
@@ -71,6 +103,7 @@ def _build_dispatch_message(
     step_info: dict[str, int] | None = None,
     retry_info: RetryInfo | None = None,
     requires_approval: bool = False,
+    user_llm_keys: dict[str, str] | None = None,
 ) -> DispatchMessage:
     """에이전트에 전달할 작업 지시서를 생성합니다."""
     return {
@@ -90,6 +123,8 @@ def _build_dispatch_message(
             "llm_config": {"model": _LLM_MODEL, "temperature": _LLM_TEMPERATURE},
             "step_info": step_info or {},
             "requires_user_approval": requires_approval,
+            "user_llm_keys": user_llm_keys or {},
+            "callback_api_key": CLIENT_API_KEY,
         },
     }
 
@@ -104,7 +139,15 @@ def resolve_placeholders(params: dict[str, Any], results: dict[int, dict[str, An
         value: Any = results.get(step_num, {})
         for key in field_path:
             value = value.get(key, "") if isinstance(value, dict) else ""
-        return str(value) if value else ""
+        # json.dumps로 직렬화하여 JSON 특수문자(", \, 개행 등)를 이스케이프합니다.
+        # 문자열 값은 따옴표를 포함한 JSON 리터럴이 되므로, 플레이스홀더가
+        # 이미 따옴표 안에 있는 경우(예: "{{step_1.result.x}}")를 위해
+        # 문자열이면 앞뒤 따옴표를 제거하고 이스케이프된 내용만 반환합니다.
+        serialized = json.dumps(value, ensure_ascii=False)
+        if isinstance(value, str):
+            # "escaped content" → escaped content (따옴표 제거)
+            return serialized[1:-1]
+        return serialized
 
     resolved = re.sub(r"\{\{step_(\d+)\.result\.([\w.]+)\}\}", replacer, params_str)
     try:
@@ -157,6 +200,21 @@ class OrchestraManager:
 
                 _, raw = result
                 task: OrchestraTask = json.loads(raw)
+                try:
+                    verify_task(task)
+                except DispatchAuthError as exc:
+                    logger.error("[OrchestraManager] 서명 검증 실패 — DLQ로 이동: %s", exc)
+                    await self._redis.rpush(
+                        "orchestra:dlq",
+                        json.dumps({
+                            "id": str(uuid.uuid4()),
+                            "reason": "INVALID_SIGNATURE",
+                            "task_id": task.get("task_id", "unknown"),
+                            "error": {"code": "INVALID_SIGNATURE", "message": str(exc)},
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }, ensure_ascii=False),
+                    )
+                    continue
                 asyncio.create_task(self._safe_process_task(task))
             except asyncio.CancelledError: break
             except Exception as exc:
@@ -182,8 +240,13 @@ class OrchestraManager:
 
         await self._state.init_session(session_id, user_id, channel_id)
         await self._state.add_message(session_id, user_id, "user", user_text, provider="slack", thread_id=thread_id)
-        
-        await self._state.update_task_state(task_id, {"status": "PROCESSING", "session_id": session_id})
+
+        # user_id 를 태스크 상태에 기록해 소유권 검증에 사용
+        await self._state.update_task_state(task_id, {
+            "status": "PROCESSING",
+            "session_id": session_id,
+            "user_id": user_id,
+        })
 
         context = await self._state.build_context_for_llm(session_id, user_id)
         summary_data = await self._state.get_session_context_summary(session_id)
@@ -195,6 +258,7 @@ class OrchestraManager:
             user_text, session_id, context,
             style_guide=summary_data.get("style"),
             agent_capabilities=agent_capabilities,
+            user_llm_keys=summary_data.get("llm_keys"),
         )
 
         if nlu_result.type == "direct_response":
@@ -224,14 +288,23 @@ class OrchestraManager:
                 return
 
         timeout = AGENT_TIMEOUT_MAP.get(agent_name, 300)
+        needs_approval = _requires_approval(nlu_result.action, nlu_result.metadata.requires_user_approval)
         dispatch = _build_dispatch_message(
             dispatch_task_id, task["session_id"], agent_name, nlu_result.action,
             nlu_result.params, task["requester"], timeout, content=task.get("content", ""),
-            requires_approval=nlu_result.metadata.requires_user_approval
+            requires_approval=needs_approval
         )
 
+        if needs_approval:
+            approval_msg = f"다음 작업을 실행하시겠습니까?\n- 에이전트: {agent_name}\n- 액션: {nlu_result.action}\n- 파라미터: {json.dumps(nlu_result.params, ensure_ascii=False)}"
+            # 임시 Result 모방 객체 (request_user_approval의 호환성 유지)
+            fake_result = {"agent": "orchestra", "result_data": {"summary": approval_msg}}
+            if not await self.request_user_approval(fake_result, task):
+                await self._send_to_comm_agent(task, "사용자에 의해 작업이 취소되었습니다.", False, "orchestra")
+                return
+
         result = await self._execute_agent_task(agent_name, dispatch_task_id, dispatch, timeout)
-        await self._handle_agent_result(result, task, nlu_result.metadata.requires_user_approval)
+        await self._handle_agent_result(result, task, False)  # 실행 후에는 승인 요청 안함
 
     async def run_plan(self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask) -> None:
         plan = nlu_result.plan
@@ -243,13 +316,21 @@ class OrchestraManager:
             dispatch_task_id = str(uuid.uuid4())
             timeout = AGENT_TIMEOUT_MAP.get(step.selected_agent, 300)
             
+            step_needs_approval = _requires_approval(step.action, step.metadata.requires_user_approval)
             dispatch = _build_dispatch_message(
                 dispatch_task_id, original_task["session_id"], step.selected_agent,
                 step.action, params, original_task["requester"], timeout,
                 content=original_task.get("content", ""),
                 step_info={"current": step.step, "total": total_steps},
-                requires_approval=step.metadata.requires_user_approval
+                requires_approval=step_needs_approval
             )
+
+            if step_needs_approval:
+                approval_msg = f"다음 작업을 실행하시겠습니까?\n- 에이전트: {step.selected_agent}\n- 액션: {step.action}\n- 파라미터: {json.dumps(params, ensure_ascii=False)}"
+                fake_result = {"agent": "orchestra", "result_data": {"summary": approval_msg}}
+                if not await self.request_user_approval(fake_result, original_task):
+                    await self._send_to_comm_agent(original_task, "사용자에 의해 작업이 취소되었습니다.", False, "orchestra")
+                    return
 
             await self._send_progress_to_comm(original_task, int((step.step-1)/total_steps*100), f"[{step.step}/{total_steps}] {step.selected_agent} 작업 중...")
             result = await self._execute_agent_task(step.selected_agent, dispatch_task_id, dispatch, timeout)
@@ -259,8 +340,6 @@ class OrchestraManager:
                 return
 
             results[step.step] = result.get("result_data", {})
-            if step.metadata.requires_user_approval:
-                if not await self.request_user_approval(result, original_task): return
 
         final_res = results.get(plan[-1].step, {})
         summary = final_res.get("summary", "모든 단계가 완료되었습니다.")
@@ -282,6 +361,50 @@ class OrchestraManager:
         }
         await self._push_to_dlq("timeout", task_id, failed["error"])
         return failed
+
+    async def cancel_task(self, task_id: str, user_id: str) -> bool:
+        """진행 중인 태스크를 취소합니다. wait_for_result 대기를 해제하기 위해 가짜 결과를 푸시합니다."""
+        state = await self._state.get_task_state(task_id)
+        if not state:
+            return False
+
+        # 소유권 검증: 태스크를 제출한 user_id 와 취소 요청자가 일치해야 한다
+        task_owner = state.get("user_id")
+        if task_owner and task_owner != user_id:
+            raise PermissionError(
+                f"이 태스크를 취소할 권한이 없습니다. "
+                f"(요청자: {user_id}, 소유자: {task_owner})"
+            )
+
+        current_status = state.get("status", "UNKNOWN")
+        if current_status in ("COMPLETED", "FAILED", "CANCELLED"):
+            return False # 이미 종료된 상태
+            
+        # 1. 상태 업데이트
+        await self._state.update_task_state(task_id, {"status": "CANCELLED"})
+        await self._state.update_task_history_status(task_id, "CANCELLED")
+        
+        # 2. wait_for_result 블로킹 해제를 위한 가짜 결과(CANCELLED) 주입
+        cancel_result: AgentResult = {
+            "task_id": task_id,
+            "status": "FAILED",
+            "agent": "orchestra",
+            "result_data": {},
+            "error": {
+                "code": "CANCELLED_BY_USER",
+                "message": "사용자에 의해 작업이 취소되었습니다.",
+                "traceback": None
+            },
+            "usage_stats": {}
+        }
+        await self.receive_agent_result(cancel_result)
+        
+        # 3. 진행 로그 기록
+        session_id = state.get("session_id")
+        await self._state.add_agent_log(
+            "orchestra", "cancel_task", "사용자가 태스크를 취소했습니다.", task_id, session_id
+        )
+        return True
 
     async def _push_to_dlq(self, reason: str, task_id: str, error: dict[str, Any]) -> None:
         entry = {
@@ -346,6 +469,13 @@ class OrchestraManager:
 
     async def _run_sandbox_task(self, task_id: str, params: dict[str, Any]) -> dict[str, Any]:
         """SandboxTool을 통해 코드를 직접 실행하고 AgentResult 형식으로 반환합니다."""
+        if self._sandbox_tool is None:
+            return {
+                "task_id": task_id, "status": "FAILED",
+                "result_data": {},
+                "error": {"code": "SANDBOX_DISABLED", "message": "샌드박스 기능이 비활성화되어 있습니다.", "traceback": None},
+                "usage_stats": {},
+            }
         try:
             result = await self._sandbox_tool.execute_code(params)  # type: ignore[union-attr]
             return {
