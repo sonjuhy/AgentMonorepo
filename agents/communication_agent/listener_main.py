@@ -14,6 +14,10 @@ import logging
 import os
 
 import uvicorn
+from shared_core.agent_logger import setup_logging
+
+# 보안 마스킹 필터가 적용된 로깅 설정 활성화
+setup_logging()
 
 # uvicorn 과 통합된 로그 포맷 설정
 # uvicorn.run() 이 내부 로거를 덮어쓰므로 log_config 로 직접 지정

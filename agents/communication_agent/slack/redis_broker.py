@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 import redis.asyncio as aioredis
+from shared_core.dispatch_auth import sign_task
 
 logger = logging.getLogger("slack_agent.redis_broker")
 
@@ -90,7 +91,7 @@ class RedisBroker:
             "source": source,
             "thread_ts": thread_ts,
         }
-        await self._client.rpush(ORCHESTRA_TASKS_KEY, json.dumps(task, ensure_ascii=False))
+        await self._client.rpush(ORCHESTRA_TASKS_KEY, json.dumps(sign_task(task), ensure_ascii=False))
         logger.debug("[RedisBroker] push_to_orchestra task_id=%s session_id=%s source=%s", task_id, session_id, source)
         return task_id
 
