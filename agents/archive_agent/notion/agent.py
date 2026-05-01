@@ -31,12 +31,13 @@ UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-
 def is_uuid(val: str) -> bool:
     """문자열이 유효한 UUID 형식인지 확인합니다."""
     return bool(UUID_PATTERN.match(val))
-
+from shared_core.agent_logger import AgentLogger
+from shared_core.storage.sqlite_manager import SqliteStorageManager
 
 class ArchiveAgent:
     agent_name: str = "archive_agent"
 
-    def __init__(self, task_analyzer: TaskAnalyzerProtocol | None = None) -> None:
+    def __init__(self, task_analyzer: TaskAnalyzerProtocol | None = None, storage = None) -> None:
         self._token: str = os.environ.get("NOTION_TOKEN", "")
         self._database_id: str = os.environ.get("NOTION_DATABASE_ID", "")
         self._headers: dict[str, str] = {
@@ -46,6 +47,7 @@ class ArchiveAgent:
         }
         self.task_analyzer = task_analyzer or ClaudeAPITaskAnalyzer()
         self.logger = AgentLogger(self.agent_name)
+        self._storage = storage or SqliteStorageManager()
 
     # ── 기본 도구 (Notion API Wrappers) ──────────────────────────────────────────
 

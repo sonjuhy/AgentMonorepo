@@ -7,8 +7,8 @@ import os
 import traceback
 import json
 import glob
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from ..models import (
     ArchiveTaskParams,
@@ -18,11 +18,12 @@ from ..models import (
     RawPayload,
 )
 from shared_core.agent_logger import AgentLogger
+from shared_core.storage.sqlite_manager import SqliteStorageManager
 
 class ObsidianAgent:
     agent_name: str = "obsidian_agent"
 
-    def __init__(self) -> None:
+    def __init__(self, storage = None) -> None:
         self.vault_path = os.environ.get("OBSIDIAN_VAULT_PATH")
         if not self.vault_path:
             # 기본값 설정 (개발 환경 대응)
@@ -32,43 +33,51 @@ class ObsidianAgent:
             os.makedirs(self.vault_path, exist_ok=True)
             
         self.logger = AgentLogger(self.agent_name)
+        self._storage = storage or SqliteStorageManager()
 
     # ── 기본 도구 (File System Wrappers) ──────────────────────────────────────────
 
+    def _safe_path(self, file_name: str) -> Path:
+        """
+        vault_path 밖으로 벗어나는 경로(path traversal)를 차단합니다.
+        반환된 Path는 반드시 vault 내부에 위치합니다.
+        """
+        if not file_name.endswith(".md"):
+            file_name += ".md"
+        vault = Path(self.vault_path).resolve()
+        resolved = (vault / file_name).resolve()
+        if not str(resolved).startswith(str(vault) + os.sep) and resolved != vault:
+            raise ValueError(f"허용되지 않은 경로입니다: {file_name}")
+        return resolved
+
     async def read_file(self, file_name: str) -> str:
         """파일 내용을 읽어옵니다."""
-        if not file_name.endswith(".md"): file_name += ".md"
-        full_path = os.path.join(self.vault_path, file_name)
-        
-        if not os.path.exists(full_path):
+        full_path = self._safe_path(file_name)
+
+        if not full_path.exists():
             raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_name}")
-            
-        with open(full_path, "r", encoding="utf-8") as f:
-            return f.read()
+
+        return full_path.read_text(encoding="utf-8")
 
     async def write_file(self, file_name: str, content: str, append: bool = False) -> str:
         """파일을 생성하거나 수정합니다."""
-        if not file_name.endswith(".md"): file_name += ".md"
-        full_path = os.path.join(self.vault_path, file_name)
-        
+        full_path = self._safe_path(file_name)
+
+        full_path.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
-        # 디렉토리가 포함된 경로일 경우 생성
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        
-        with open(full_path, mode, encoding="utf-8") as f:
-            if append and os.path.getsize(full_path) > 0:
-                f.write("\n\n") # 구분자 추가
+        with full_path.open(mode, encoding="utf-8") as f:
+            if append and full_path.stat().st_size > 0:
+                f.write("\n\n")
             f.write(content)
-            
-        return full_path
+
+        return str(full_path)
 
     async def delete_file(self, file_name: str) -> bool:
         """파일을 삭제합니다."""
-        if not file_name.endswith(".md"): file_name += ".md"
-        full_path = os.path.join(self.vault_path, file_name)
-        
-        if os.path.exists(full_path):
-            os.remove(full_path)
+        full_path = self._safe_path(file_name)
+
+        if full_path.exists():
+            full_path.unlink()
             return True
         return False
 

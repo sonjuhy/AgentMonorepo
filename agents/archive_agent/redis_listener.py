@@ -24,8 +24,11 @@ logger = logging.getLogger("archive_agent.redis_listener")
 _AGENT_NAME = "archive_agent"
 _QUEUE_KEY = f"agent:{_AGENT_NAME}:tasks"
 _HEALTH_KEY = f"agent:{_AGENT_NAME}:health"
-_HEARTBEAT_INTERVAL = 15          # 초
-_BLPOP_TIMEOUT = 5                # 초 (5초마다 CancelledError 체크)
+_DLQ_KEY = "orchestra:dlq"
+_HEARTBEAT_INTERVAL: int = int(os.environ.get("HEARTBEAT_INTERVAL", "15"))
+_BLPOP_TIMEOUT: int = int(os.environ.get("BLPOP_TIMEOUT", "5"))
+_HTTP_REPORT_TIMEOUT: float = float(os.environ.get("HTTP_REPORT_TIMEOUT", "10.0"))
+_HEALTH_TTL: int = _HEARTBEAT_INTERVAL * 4
 
 
 class ArchiveRedisListener:
@@ -194,7 +197,7 @@ class ArchiveRedisListener:
 
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(timeout=_HTTP_REPORT_TIMEOUT) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                 logger.info(
@@ -211,9 +214,14 @@ class ArchiveRedisListener:
                 if attempt < 2:
                     await asyncio.sleep(wait)
 
-        logger.error(
-            "[ArchiveRedisListener] 결과 보고 최종 실패: task_id=%s", task_id
-        )
+        logger.error("[ArchiveRedisListener] 결과 보고 최종 실패: task_id=%s", task_id)
+        try:
+            redis = await self._ensure_redis()
+            dlq_entry = {**payload, "failed_at": datetime.now(timezone.utc).isoformat(), "reason": "http_report_failed"}
+            await redis.rpush(_DLQ_KEY, json.dumps(dlq_entry, ensure_ascii=False))
+            logger.warning("[ArchiveRedisListener] 결과 DLQ 저장: task_id=%s", task_id)
+        except Exception as dlq_exc:
+            logger.error("[ArchiveRedisListener] DLQ 저장 실패: %s", dlq_exc)
 
     # ── Heartbeat ──────────────────────────────────────────────────────────────
 
@@ -268,5 +276,6 @@ class ArchiveRedisListener:
                     "max_concurrency": "3",
                 },
             )
+            await redis.expire(_HEALTH_KEY, _HEALTH_TTL)
         except Exception as exc:
             logger.warning("[ArchiveRedisListener] heartbeat 업데이트 실패: %s", exc)
