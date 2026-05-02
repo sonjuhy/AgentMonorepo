@@ -3,13 +3,17 @@ SearchProviderProtocol 구체 구현체
 
 - GeminiSearchProvider  : Google Gemini API + Search Grounding
 - PerplexitySearchProvider: Perplexity Sonar API
+- FallbackSearchProvider: 다중 공급자 체이닝 및 재시도 로직
 - build_search_provider : 설정 기반 팩토리 함수
 """
 
 import asyncio
+import logging
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
-from shared_core.search.interfaces import SearchProviderName, SearchResult
+from shared_core.search.interfaces import SearchProviderName, SearchResult, SearchProviderProtocol
 
+logger = logging.getLogger(__name__)
 
 class GeminiSearchProvider:
     """
@@ -30,10 +34,12 @@ class GeminiSearchProvider:
         self._genai = genai
         self._model_name = model
 
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
     async def search(self, query: str) -> SearchResult:
         """Gemini Search Grounding을 통해 웹 검색을 수행합니다."""
         return await asyncio.to_thread(self._sync_search, query, None)
 
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
     async def search_with_context(self, query: str, context: str) -> SearchResult:
         """컨텍스트를 시스템 지침으로 전달하여 정밀 검색을 수행합니다."""
         return await asyncio.to_thread(self._sync_search, query, context)
@@ -90,11 +96,13 @@ class PerplexitySearchProvider:
         self._api_key = api_key
         self._model = model
 
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
     async def search(self, query: str) -> SearchResult:
         """Perplexity API에 단일 쿼리를 전달하여 검색합니다."""
         messages = [{"role": "user", "content": query}]
         return await self._call_api(messages)
 
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
     async def search_with_context(self, query: str, context: str) -> SearchResult:
         """시스템 메시지로 컨텍스트를 포함하여 검색합니다."""
         messages = [
@@ -127,12 +135,41 @@ class PerplexitySearchProvider:
         return SearchResult(answer=answer, citations=citations)
 
 
+class FallbackSearchProvider(SearchProviderProtocol):
+    """
+    주 검색 공급자가 실패할 경우 보조 공급자로 전환하는 검색 공급자입니다.
+    """
+    def __init__(self, primary: SearchProviderProtocol, secondary: SearchProviderProtocol | None = None) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    async def search(self, query: str) -> SearchResult:
+        try:
+            return await self._primary.search(query)
+        except Exception as e:
+            if not self._secondary:
+                logger.error("Primary search provider failed, and no secondary provider is configured: %s", e)
+                raise
+            logger.warning("Primary search provider failed (%s). Falling back to secondary.", e)
+            return await self._secondary.search(query)
+
+    async def search_with_context(self, query: str, context: str) -> SearchResult:
+        try:
+            return await self._primary.search_with_context(query, context)
+        except Exception as e:
+            if not self._secondary:
+                logger.error("Primary search provider failed, and no secondary provider is configured: %s", e)
+                raise
+            logger.warning("Primary search provider failed (%s). Falling back to secondary.", e)
+            return await self._secondary.search_with_context(query, context)
+
+
 def build_search_provider(
     provider_name: SearchProviderName,
     api_key: str,
     gemini_model: str = "gemini-2.0-flash",
     perplexity_model: str = "sonar",
-) -> GeminiSearchProvider | PerplexitySearchProvider:
+) -> SearchProviderProtocol:
     """
     설정값을 기반으로 SearchProvider 인스턴스를 생성합니다.
 

@@ -16,6 +16,8 @@ class ResearchAgentConfig:
         gemini_model: Gemini 검색 모델 이름.
         perplexity_model: Perplexity 검색 모델 이름.
         report_output_dir: 보고서 저장 기본 경로.
+        fallback_provider: 보조 검색 공급자 (선택적).
+        fallback_api_key: 보조 검색 공급자 API 키.
     """
 
     search_provider: SearchProviderName = "gemini"
@@ -23,6 +25,8 @@ class ResearchAgentConfig:
     gemini_model: str = "gemini-2.0-flash"
     perplexity_model: str = "sonar"
     report_output_dir: Path = field(default_factory=lambda: Path("./reports"))
+    fallback_provider: SearchProviderName | None = None
+    fallback_api_key: str = ""
 
 
 def load_config_from_env() -> ResearchAgentConfig:
@@ -36,6 +40,7 @@ def load_config_from_env() -> ResearchAgentConfig:
         GEMINI_SEARCH_MODEL       : Gemini 모델 이름. 기본값 "gemini-2.0-flash".
         PERPLEXITY_SEARCH_MODEL   : Perplexity 모델 이름. 기본값 "sonar".
         RESEARCH_REPORT_OUTPUT_DIR: 보고서 저장 디렉터리. 기본값 "./reports".
+        RESEARCH_FALLBACK_PROVIDER: 보조 검색 공급자 ("gemini" | "perplexity"). 기본값 None.
     """
     provider: SearchProviderName = os.environ.get(  # type: ignore[assignment]
         "RESEARCH_SEARCH_PROVIDER", "gemini"
@@ -45,6 +50,16 @@ def load_config_from_env() -> ResearchAgentConfig:
         api_key = os.environ.get("PERPLEXITY_API_KEY", "")
     else:
         api_key = os.environ.get("GEMINI_API_KEY", "")
+        
+    fallback_provider: SearchProviderName | None = os.environ.get( # type: ignore[assignment]
+        "RESEARCH_FALLBACK_PROVIDER"
+    )
+    fallback_api_key = ""
+    if fallback_provider:
+        if fallback_provider == "perplexity":
+            fallback_api_key = os.environ.get("PERPLEXITY_API_KEY", "")
+        else:
+            fallback_api_key = os.environ.get("GEMINI_API_KEY", "")
 
     return ResearchAgentConfig(
         search_provider=provider,
@@ -54,4 +69,6 @@ def load_config_from_env() -> ResearchAgentConfig:
         report_output_dir=Path(
             os.environ.get("RESEARCH_REPORT_OUTPUT_DIR", "./reports")
         ),
+        fallback_provider=fallback_provider,
+        fallback_api_key=fallback_api_key,
     )

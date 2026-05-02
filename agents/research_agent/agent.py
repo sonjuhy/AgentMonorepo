@@ -16,7 +16,12 @@ import httpx
 import redis.asyncio as aioredis
 
 from .config import ResearchAgentConfig, load_config_from_env
-from .providers import SearchProviderProtocol, build_provider
+from .providers import build_search_provider
+from .pipeline import IntentAnalyzer, SearchExecutor, ReportSynthesizer
+from shared_core.search.interfaces import SearchProviderProtocol
+from shared_core.llm.factory import build_llm_provider_from_config
+from shared_core.llm.llm_config import LLMConfig, load_llm_config_for_agent, llm_config_from_dispatch
+from shared_core.storage.sqlite_manager import SqliteStorageManager
 
 logger = logging.getLogger("research_agent.agent")
 
@@ -27,19 +32,83 @@ _BLPOP_TIMEOUT = 5
 class ResearchAgent:
     agent_name: str = "research-agent"
 
-    def __init__(self, config: ResearchAgentConfig | None = None, provider: SearchProviderProtocol | None = None) -> None:
+    def __init__(self, config: ResearchAgentConfig | None = None, provider: SearchProviderProtocol | None = None, storage=None) -> None:
         self._config = config or load_config_from_env()
-        self._provider = provider or build_provider(self._config)
 
-    async def investigate(self, query: str) -> str:
+        primary_provider = build_search_provider(
+            provider_name=self._config.search_provider,
+            api_key=self._config.search_api_key,
+            gemini_model=self._config.gemini_model,
+            perplexity_model=self._config.perplexity_model,
+        )
+
+        if self._config.fallback_provider:
+            from .providers import FallbackSearchProvider
+            secondary_provider = build_search_provider(
+                provider_name=self._config.fallback_provider,
+                api_key=self._config.fallback_api_key,
+                gemini_model=self._config.gemini_model,
+                perplexity_model=self._config.perplexity_model,
+            )
+            default_provider = FallbackSearchProvider(primary_provider, secondary_provider)
+        else:
+            default_provider = primary_provider
+
+        self._provider = provider or default_provider
+
+        # 에이전트별 LLM 설정 (환경변수 RESEARCH_AGENT_LLM_BACKEND 우선)
+        self._llm_config: LLMConfig = load_llm_config_for_agent(self.agent_name)
+        llm = build_llm_provider_from_config(self._llm_config)
+
+        logger.info(
+            "[ResearchAgent] 초기화 완료 (LLM backend=%s, model=%s)",
+            self._llm_config.backend,
+            self._llm_config.model,
+        )
+
+        # Initialize Pipeline Components
+        self._intent_analyzer = IntentAnalyzer(llm=llm)
+        self._search_executor = SearchExecutor(provider=self._provider)
+        self._report_synthesizer = ReportSynthesizer(llm=llm)
+
+        # Initialize Storage
+        self._storage = storage or SqliteStorageManager()
+
+    def _build_pipeline_for_dispatch(self, dispatch_msg: dict) -> tuple[IntentAnalyzer, ReportSynthesizer]:
+        """dispatch별 per-call llm_config가 있으면 해당 LLM으로 파이프라인 컴포넌트를 생성합니다."""
+        per_call = llm_config_from_dispatch(dispatch_msg)
+        if per_call is None:
+            return self._intent_analyzer, self._report_synthesizer
+
+        logger.info(
+            "[ResearchAgent] per-call LLM 설정 적용 (backend=%s, model=%s)",
+            per_call.backend,
+            per_call.model,
+        )
+        llm = build_llm_provider_from_config(per_call)
+        return IntentAnalyzer(llm=llm), ReportSynthesizer(llm=llm)
+
+    async def investigate(self, query: str, dispatch_msg: dict | None = None) -> str:
+        intent_analyzer, report_synthesizer = (
+            self._build_pipeline_for_dispatch(dispatch_msg)
+            if dispatch_msg is not None
+            else (self._intent_analyzer, self._report_synthesizer)
+        )
         try:
-            return await self._provider.search(query)
+            queries = await intent_analyzer.analyze(query)
+            results = await self._search_executor.execute(queries)
+            report, citations = await report_synthesizer.synthesize(query, results)
+
+            final_report = report
+            if citations:
+                final_report += "\n\n### 출처\n" + "\n".join(f"- {c}" for c in citations)
+            return final_report
         except Exception as e:
             return f"검색 중 오류 발생: {e}"
 
-    async def _dispatch(self, action: str, payload: dict) -> dict[str, Any]:
+    async def _dispatch(self, action: str, payload: dict, dispatch_msg: dict | None = None) -> dict[str, Any]:
         if action == "investigate":
-            result_text = await self.investigate(payload.get("query", ""))
+            result_text = await self.investigate(payload.get("query", ""), dispatch_msg=dispatch_msg)
             return {"status": "success", "data": result_text}
         return {"status": "error", "message": f"알 수 없는 액션: {action}"}
 
@@ -50,6 +119,8 @@ class ResearchAgent:
         status: str,
         result_data: dict[str, Any],
         error: dict[str, Any] | None,
+        reference_id: str | None = None,
+        payload_summary: str | None = None,
     ) -> None:
         """처리 결과를 오케스트라 /results 엔드포인트로 전송합니다. 최대 3회 재시도."""
         payload = {
@@ -60,6 +131,11 @@ class ResearchAgent:
             "error": error,
             "usage_stats": {},
         }
+        if reference_id:
+            payload["reference_id"] = reference_id
+        if payload_summary:
+            payload["payload_summary"] = payload_summary
+
         url = f"{orchestra_url}/results"
         for attempt in range(3):
             try:
@@ -90,7 +166,7 @@ class ResearchAgent:
             params = dispatch_msg.get("params", {})
             logger.info("[ResearchAgent] 태스크 수신: task_id=%s action=%s", task_id, action)
 
-            result = await self._dispatch(action, params)
+            result = await self._dispatch(action, params, dispatch_msg=dispatch_msg)
 
             if result.get("status") == "error":
                 agent_result = {
@@ -100,7 +176,6 @@ class ResearchAgent:
                 }
             else:
                 raw_text = result.get("data", "")
-                # 하이브리드 아키텍처: 대용량 원문을 로컬에 저장하고 reference_id 발급
                 ref_id = await self._storage.save_data(
                     data={"raw_text": raw_text},
                     metadata={"action": action, "task_id": task_id}
@@ -109,9 +184,7 @@ class ResearchAgent:
 
                 agent_result = {
                     "status": "COMPLETED",
-                    "result_data": {
-                        "summary": summary,
-                    },
+                    "result_data": {"summary": summary},
                     "reference_id": ref_id,
                     "payload_summary": summary,
                     "error": None,
@@ -140,7 +213,8 @@ class ResearchAgent:
 
     async def run(self) -> None:
         redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
-        if "localhost" in redis_url: redis_url = redis_url.replace("localhost", "127.0.0.1")
+        if "localhost" in redis_url:
+            redis_url = redis_url.replace("localhost", "127.0.0.1")
         orchestra_url = os.environ.get("ORCHESTRA_URL", "http://orchestra-agent:8001")
         queue_key = f"agent:{self.agent_name}:tasks"
         health_key = f"agent:{self.agent_name}:health"
@@ -159,8 +233,10 @@ class ResearchAgent:
                     })
                     await redis.expire(health_key, 60)
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
-                except asyncio.CancelledError: break
-                except Exception: await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    await asyncio.sleep(5)
 
         hb_task = asyncio.create_task(heartbeat_loop())
 
