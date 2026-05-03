@@ -24,12 +24,12 @@ class GeminiProvider:
         GEMINI_MODEL: 사용할 모델 (기본값: gemini-2.0-flash)
     """
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
         from google import genai
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
-        self._client = genai.Client(api_key=api_key)
+        self._api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not self._api_key:
+            raise ValueError("GEMINI_API_KEY가 제공되지 않았거나 환경변수가 설정되지 않았습니다.")
+        self._client = genai.Client(api_key=self._api_key)
         self._model = model or os.environ.get("GEMINI_MODEL", _DEFAULT_MODEL)
 
     async def generate_response(
