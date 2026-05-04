@@ -40,7 +40,7 @@ class AgentMessage(BaseModel):
 
 
 class MessageBrokerProtocol(Protocol):
-    """Redis 기반 에이전트 메시지 브로커 인터페이스.
+    """cassiopeia-sdk 기반 에이전트 메시지 브로커 인터페이스.
 
     모든 에이전트 메시지 브로커 구현체는 이 Protocol을 따릅니다.
     채널 이름 규칙: ``agent:{agent_name}``
@@ -57,11 +57,8 @@ class MessageBrokerProtocol(Protocol):
         """
         ...
 
-    def subscribe(self, agent_name: AgentName) -> AsyncIterator[AgentMessage]:
-        """특정 에이전트를 대상으로 하는 메시지를 비동기로 수신 대기합니다.
-
-        Args:
-            agent_name: 구독할 에이전트 이름. ``agent:{agent_name}`` 채널을 구독합니다.
+    def subscribe(self) -> AsyncIterator[AgentMessage]:
+        """이 브로커의 agent_id를 대상으로 하는 메시지를 비동기로 수신 대기합니다.
 
         Returns:
             수신된 AgentMessage를 순차적으로 yield 하는 AsyncIterator.

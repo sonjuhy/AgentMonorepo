@@ -22,7 +22,7 @@ from .models import ExecuteRequest, SandboxTaskResult
 from .network import TAPInterface
 from .vsock import open_vsock_connection, recv_json, send_json
 
-logger = logging.getLogger("orchestra_agent.sandbox.firecracker")
+logger = logging.getLogger("cassiopeia_agent.sandbox.firecracker")
 
 _FIRECRACKER_BIN = os.environ.get("FIRECRACKER_BIN", "/usr/local/bin/firecracker")
 _KERNEL_IMAGE = os.environ.get("FIRECRACKER_KERNEL", "/opt/firecracker/vmlinux")

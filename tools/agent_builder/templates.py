@@ -320,7 +320,7 @@ REDIS_LISTENER_PY = '''\
 <<<CLASS_NAME>>> Agent Redis 리스너 — 자동 생성 (agent-builder)
 - OrchestraManager가 agent:<<<SNAKE_NAME>>>:tasks 큐에 push한 DispatchMessage를 BLPOP으로 수신
 - <<<CLASS_NAME>>>Agent.handle_dispatch()에 위임 후 orchestra /results로 결과 보고
-- agent:<<<SNAKE_NAME>>>:health Redis Hash를 15초 주기로 갱신
+- agent:<<<SNAKE_NAME>>>:health Redis Hash를 주기적으로 갱신 (HEARTBEAT_INTERVAL 환경변수)
 """
 from __future__ import annotations
 
@@ -340,8 +340,11 @@ logger = logging.getLogger("<<<SNAKE_NAME>>>_agent.redis_listener")
 
 _QUEUE_KEY = "agent:<<<SNAKE_NAME>>>:tasks"
 _HEALTH_KEY = "agent:<<<SNAKE_NAME>>>:health"
-_HEARTBEAT_INTERVAL = 15
-_BLPOP_TIMEOUT = 5
+_DLQ_KEY = "orchestra:dlq"
+_HEARTBEAT_INTERVAL: int = int(os.environ.get("HEARTBEAT_INTERVAL", "15"))
+_BLPOP_TIMEOUT: int = int(os.environ.get("BLPOP_TIMEOUT", "5"))
+_HTTP_REPORT_TIMEOUT: float = float(os.environ.get("HTTP_REPORT_TIMEOUT", "10.0"))
+_HEALTH_TTL: int = _HEARTBEAT_INTERVAL * 4
 
 
 class <<<CLASS_NAME>>>RedisListener:
@@ -354,7 +357,13 @@ class <<<CLASS_NAME>>>RedisListener:
         orchestra_url: str | None = None,
     ) -> None:
         self._agent = agent
-        self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379")
+        # 커뮤니티 에이전트는 제한된 권한의 REDIS_COMMUNITY_URL을 우선 사용합니다.
+        # REDIS_COMMUNITY_URL은 agent:*:tasks, agent:*:health, orchestra:results:*, orchestra:dlq
+        # 키만 접근 가능한 'community' 계정 URL입니다.
+        self._redis_url = redis_url or os.environ.get(
+            "REDIS_COMMUNITY_URL",
+            os.environ.get("REDIS_URL", "redis://localhost:6379"),
+        )
         self._orchestra_url = orchestra_url or os.environ.get(
             "ORCHESTRA_URL", "http://orchestra-agent:8001"
         )
@@ -393,42 +402,57 @@ class <<<CLASS_NAME>>>RedisListener:
 
     async def handle_task(self, raw: str) -> None:
         task_id = "unknown"
+        callback_api_key = os.environ.get("ORCHESTRA_CLIENT_KEY", "")
+        agent_result: dict[str, Any] = {
+            "task_id": "unknown",
+            "status": "FAILED",
+            "result_data": {},
+            "error": {"code": "INTERNAL_ERROR", "message": "처리 중 알 수 없는 오류", "traceback": None},
+            "usage_stats": {},
+        }
         try:
             dispatch_msg: dict[str, Any] = json.loads(raw)
             task_id = dispatch_msg.get("task_id", "unknown")
+            agent_result["task_id"] = task_id
+            # dispatch 메시지 메타데이터에서 콜백 인증 키 추출 (오케스트라가 주입)
+            callback_api_key = (
+                dispatch_msg.get("metadata", {}).get("callback_api_key")
+                or callback_api_key
+            )
             logger.info("[<<<CLASS_NAME>>>RedisListener] 태스크 수신: task_id=%s", task_id)
             self._current_task_count += 1
             await self._update_health("BUSY")
-            agent_result: dict[str, Any] = await self._agent.handle_dispatch(dispatch_msg)
+            agent_result = await self._agent.handle_dispatch(dispatch_msg)
         except json.JSONDecodeError as exc:
             logger.error("[<<<CLASS_NAME>>>RedisListener] JSON 파싱 실패: %s", exc)
-            agent_result = {
-                "task_id": task_id,
-                "status": "FAILED",
-                "result_data": {},
+            agent_result.update({
                 "error": {"code": "PARSE_ERROR", "message": str(exc), "traceback": None},
-                "usage_stats": {},
-            }
+            })
+        except asyncio.CancelledError:
+            logger.warning("[<<<CLASS_NAME>>>RedisListener] 태스크 취소됨: task_id=%s", task_id)
+            agent_result.update({
+                "error": {"code": "CANCELLED", "message": "태스크가 취소되었습니다.", "traceback": None},
+            })
+            raise
         except Exception as exc:
             logger.error("[<<<CLASS_NAME>>>RedisListener] 처리 실패 task_id=%s: %s", task_id, exc)
-            agent_result = {
-                "task_id": task_id,
-                "status": "FAILED",
-                "result_data": {},
+            agent_result.update({
                 "error": {"code": "INTERNAL_ERROR", "message": str(exc), "traceback": None},
-                "usage_stats": {},
-            }
+            })
         finally:
             self._current_task_count = max(0, self._current_task_count - 1)
             if self._current_task_count == 0:
                 await self._update_health("IDLE")
-
-        await self._report_result(
-            task_id=agent_result.get("task_id", task_id),
-            result_data=agent_result.get("result_data", {}),
-            status=agent_result.get("status", "FAILED"),
-            error=agent_result.get("error"),
-        )
+            try:
+                await self._report_result(
+                    task_id=agent_result.get("task_id", task_id),
+                    result_data=agent_result.get("result_data", {}),
+                    status=agent_result.get("status", "FAILED"),
+                    error=agent_result.get("error"),
+                    callback_api_key=callback_api_key,
+                )
+            except Exception as exc:
+                logger.error("[<<<CLASS_NAME>>>RedisListener] 결과 보고 실패 task_id=%s: %s", task_id, exc)
 
     async def _report_result(
         self,
@@ -436,6 +460,7 @@ class <<<CLASS_NAME>>>RedisListener:
         result_data: dict[str, Any],
         status: str,
         error: dict[str, Any] | None,
+        callback_api_key: str = "",
     ) -> None:
         payload = {
             "task_id": task_id,
@@ -444,11 +469,12 @@ class <<<CLASS_NAME>>>RedisListener:
             "error": error,
             "usage_stats": {},
         }
+        headers = {"X-API-Key": callback_api_key} if callback_api_key else {}
         url = f"{self._orchestra_url}/results"
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.post(url, json=payload)
+                async with httpx.AsyncClient(timeout=_HTTP_REPORT_TIMEOUT) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
                     resp.raise_for_status()
                 logger.info(
                     "[<<<CLASS_NAME>>>RedisListener] 결과 보고 완료: task_id=%s status=%s",
@@ -464,6 +490,13 @@ class <<<CLASS_NAME>>>RedisListener:
                 if attempt < 2:
                     await asyncio.sleep(wait)
         logger.error("[<<<CLASS_NAME>>>RedisListener] 결과 보고 최종 실패: task_id=%s", task_id)
+        try:
+            redis = await self._ensure_redis()
+            dlq_entry = {**payload, "failed_at": datetime.now(timezone.utc).isoformat(), "reason": "http_report_failed"}
+            await redis.rpush(_DLQ_KEY, json.dumps(dlq_entry, ensure_ascii=False))
+            logger.warning("[<<<CLASS_NAME>>>RedisListener] 결과 DLQ 저장: task_id=%s", task_id)
+        except Exception as dlq_exc:
+            logger.error("[<<<CLASS_NAME>>>RedisListener] DLQ 저장 실패: %s", dlq_exc)
 
     async def _heartbeat_loop(self) -> None:
         logger.info("[<<<CLASS_NAME>>>RedisListener] heartbeat 시작")
@@ -489,6 +522,7 @@ class <<<CLASS_NAME>>>RedisListener:
                     "current_tasks": str(self._current_task_count),
                 },
             )
+            await redis.expire(_HEALTH_KEY, _HEALTH_TTL)
         except Exception as exc:
             logger.warning("[<<<CLASS_NAME>>>RedisListener] heartbeat 업데이트 실패: %s", exc)
 '''
@@ -500,7 +534,7 @@ FASTAPI_APP_PY = '''\
 """
 <<<CLASS_NAME>>> Agent FastAPI 서버 — 자동 생성 (agent-builder)
 - GET  /health : 에이전트 상태 조회
-- POST /dispatch : Redis 우회 직접 실행 (개발/테스트용)
+- POST /dispatch : Redis 우회 직접 실행 (X-Dispatch-Secret 헤더 인증 필수)
 """
 from __future__ import annotations
 
@@ -511,7 +545,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 
 from .agent import <<<CLASS_NAME>>>Agent
@@ -569,6 +604,25 @@ app = FastAPI(
 )
 
 
+_DISPATCH_SECRET_HEADER = APIKeyHeader(name="X-Dispatch-Secret", auto_error=False)
+_DISPATCH_SECRET: str = os.environ.get("AGENT_DISPATCH_SECRET", "")
+
+
+async def _verify_dispatch_secret(
+    secret: str | None = Security(_DISPATCH_SECRET_HEADER),
+) -> None:
+    if not _DISPATCH_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AGENT_DISPATCH_SECRET 환경변수가 설정되지 않아 /dispatch를 사용할 수 없습니다.",
+        )
+    if not secret or secret != _DISPATCH_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="유효하지 않은 X-Dispatch-Secret 헤더입니다.",
+        )
+
+
 class DispatchRequest(BaseModel):
     task_id: str
     params: dict[str, Any] = {}
@@ -585,9 +639,10 @@ async def health_check() -> dict[str, Any]:
     }
 
 
-@app.post("/dispatch", status_code=status.HTTP_202_ACCEPTED)
+@app.post("/dispatch", status_code=status.HTTP_202_ACCEPTED,
+          dependencies=[Depends(_verify_dispatch_secret)])
 async def direct_dispatch(req: DispatchRequest) -> dict[str, Any]:
-    """Redis 우회 직접 실행 — 개발/테스트용."""
+    """Redis 우회 직접 실행 — X-Dispatch-Secret 헤더 인증 필수."""
     try:
         return await _ctx.agent.handle_dispatch({"task_id": req.task_id, "params": req.params})
     except Exception as exc:
@@ -742,11 +797,18 @@ COMPOSE_SNIPPET = '''\
       dockerfile: agents/<<<SNAKE_NAME>>>_agent/Dockerfile
     image: agentmonorepo-<<<SNAKE_NAME>>>_agent
     environment:
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      # 커뮤니티 에이전트는 제한된 권한의 community 계정 URL만 사용합니다 (ACL 적용).
+      - REDIS_COMMUNITY_URL=${REDIS_COMMUNITY_URL}
       - ORCHESTRA_URL=${ORCHESTRA_URL:-http://orchestra-agent:8001}
+      # 오케스트라 HTTP 콜백 인증 키 (/results, /logs 등 호출 시 X-API-Key 헤더에 사용)
+      - ORCHESTRA_CLIENT_KEY=${CLIENT_API_KEY}
       - HOST=0.0.0.0
       - PORT=<<<PORT>>>
-    ports:
-      - "<<<PORT>>>:<<<PORT>>>"
+      # /dispatch 엔드포인트 보호용 시크릿 (미설정 시 /dispatch 비활성화)
+      - AGENT_DISPATCH_SECRET=${AGENT_DISPATCH_SECRET}
+    # 커뮤니티 에이전트 포트는 내부 네트워크만 노출합니다 (호스트에 직접 바인딩 금지).
+    # 외부 접근이 필요한 경우 리버스 프록시(nginx 등)를 통해 제한적으로 허용하세요.
+    expose:
+      - "<<<PORT>>>"
 <<<COMPOSE_SECURITY>>>
 '''

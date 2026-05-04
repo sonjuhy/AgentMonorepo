@@ -21,7 +21,7 @@ import uuid
 
 from .models import ExecuteRequest, SandboxTaskResult
 
-logger = logging.getLogger("orchestra_agent.sandbox.docker_sandbox")
+logger = logging.getLogger("cassiopeia_agent.sandbox.docker_sandbox")
 
 _DOCKER_IMAGE = os.environ.get("SANDBOX_DOCKER_IMAGE", "python:3.12-alpine")
 

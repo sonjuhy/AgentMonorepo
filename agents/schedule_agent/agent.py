@@ -1,7 +1,7 @@
 """
 ScheduleAgent 구체 구현체
 - Google Calendar API 연동
-- Redis BLPOP으로 오케스트라 디스패치 수신
+- cassiopeia-sdk CassiopeiaClient.listen()으로 오케스트라 디스패치 수신
 - 처리 결과를 HTTP POST /results 로 오케스트라에 전송
 """
 
@@ -14,23 +14,33 @@ from typing import Any
 
 import httpx
 import redis.asyncio as aioredis
+from cassiopeia_sdk.client import AgentMessage as SdkAgentMessage, CassiopeiaClient
 
 from shared_core.calendar.interfaces import CalendarEvent, CalendarEventId
-from shared_core.messaging.schema import AgentMessage
 
 from .config import ScheduleAgentConfig, load_config_from_env
 from .providers import GoogleCalendarProvider
 
 logger = logging.getLogger("schedule_agent.agent")
 
-_HEARTBEAT_INTERVAL = 15
-_BLPOP_TIMEOUT = 5
+_HEARTBEAT_INTERVAL: int = int(os.environ.get("HEARTBEAT_INTERVAL", "15"))
+_HTTP_REPORT_TIMEOUT: float = float(os.environ.get("HTTP_REPORT_TIMEOUT", "10.0"))
+_DLQ_KEY = "orchestra:dlq"
 
 
 class ScheduleAgent:
+    """
+    일정 관리 에이전트.
+    cassiopeia-sdk를 사용해 오케스트라로부터 태스크 메시지를 수신합니다.
+    """
+
     agent_name: str = "schedule-agent"
 
-    def __init__(self, config: ScheduleAgentConfig | None = None, calendar_provider: GoogleCalendarProvider | None = None) -> None:
+    def __init__(
+        self,
+        config: ScheduleAgentConfig | None = None,
+        calendar_provider: GoogleCalendarProvider | None = None,
+    ) -> None:
         self._config = config or load_config_from_env()
         self._provider = calendar_provider or GoogleCalendarProvider(
             calendar_id=self._config.calendar_id,
@@ -82,8 +92,9 @@ class ScheduleAgent:
         status: str,
         result_data: dict[str, Any],
         error: dict[str, Any] | None,
+        redis: aioredis.Redis | None = None,
     ) -> None:
-        """처리 결과를 오케스트라 /results 엔드포인트로 전송합니다. 최대 3회 재시도."""
+        """처리 결과를 오케스트라 /results 엔드포인트로 전송합니다. 최대 3회 재시도 후 DLQ 저장."""
         payload = {
             "task_id": task_id,
             "agent": self.agent_name,
@@ -95,7 +106,7 @@ class ScheduleAgent:
         url = f"{orchestra_url}/results"
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(timeout=_HTTP_REPORT_TIMEOUT) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                 logger.info("[ScheduleAgent] 결과 보고 완료: task_id=%s status=%s", task_id, status)
@@ -106,20 +117,37 @@ class ScheduleAgent:
                 if attempt < 2:
                     await asyncio.sleep(wait)
         logger.error("[ScheduleAgent] 결과 보고 최종 실패: task_id=%s", task_id)
+        if redis:
+            try:
+                dlq_entry = {**payload, "failed_at": datetime.now(timezone.utc).isoformat(), "reason": "http_report_failed"}
+                await redis.rpush(_DLQ_KEY, json.dumps(dlq_entry, ensure_ascii=False))
+                logger.warning("[ScheduleAgent] 결과 DLQ 저장: task_id=%s", task_id)
+            except Exception as dlq_exc:
+                logger.error("[ScheduleAgent] DLQ 저장 실패: %s", dlq_exc)
 
-    async def _handle_task(self, raw: str, orchestra_url: str) -> None:
-        """BLPOP으로 수신한 DispatchMessage를 처리하고 결과를 오케스트라로 전송합니다."""
-        task_id = "unknown"
+    async def _handle_task(
+        self,
+        msg: SdkAgentMessage,
+        orchestra_url: str,
+        redis: aioredis.Redis | None = None,
+    ) -> None:
+        """cassiopeia AgentMessage를 처리하고 결과를 오케스트라로 전송합니다.
+
+        payload 구조:
+            {
+                "task_id": "...",
+                "params": { ... }  # 각 액션에 필요한 파라미터
+            }
+        """
+        task_id = msg.payload.get("task_id", "unknown")
         agent_result: dict[str, Any] = {
             "status": "FAILED",
             "result_data": {},
             "error": {"code": "INTERNAL_ERROR", "message": "처리 중 알 수 없는 오류", "traceback": None},
         }
         try:
-            dispatch_msg: dict[str, Any] = json.loads(raw)
-            task_id = dispatch_msg.get("task_id", "unknown")
-            action = dispatch_msg.get("action", "")
-            params = dispatch_msg.get("params", {})
+            action = msg.action
+            params = msg.payload.get("params", {})
             logger.info("[ScheduleAgent] 태스크 수신: task_id=%s action=%s", task_id, action)
 
             result = await self.process_message(action, params)
@@ -155,20 +183,28 @@ class ScheduleAgent:
                     status=agent_result.get("status", "FAILED"),
                     result_data=agent_result.get("result_data", {}),
                     error=agent_result.get("error"),
+                    redis=redis,
                 )
             except Exception as exc:
                 logger.error("[ScheduleAgent] 결과 보고 실패 task_id=%s: %s", task_id, exc)
 
     async def run(self) -> None:
         redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
-        if "localhost" in redis_url: redis_url = redis_url.replace("localhost", "127.0.0.1")
+        if "localhost" in redis_url:
+            redis_url = redis_url.replace("localhost", "127.0.0.1")
         orchestra_url = os.environ.get("ORCHESTRA_URL", "http://orchestra-agent:8001")
-        queue_key = f"agent:{self.agent_name}:tasks"
         health_key = f"agent:{self.agent_name}:health"
 
-        logger.info("[ScheduleAgent] 실행 시작 (Redis: %s, queue: %s)", redis_url, queue_key)
+        import re
+        safe_redis_url = re.sub(r":([^:@]+)@", ":***MASKED***@", redis_url)
+        logger.info("[ScheduleAgent] 실행 시작 (Redis: %s, agent: %s)", safe_redis_url, self.agent_name)
 
+        # 하트비트와 DLQ는 직접 Redis 클라이언트 사용
         redis = aioredis.from_url(redis_url, decode_responses=True)
+
+        # 메시지 수신은 cassiopeia-sdk 사용
+        cassiopeia = CassiopeiaClient(agent_id=self.agent_name, redis_url=redis_url)
+        await cassiopeia.connect()
 
         async def heartbeat_loop():
             while True:
@@ -180,21 +216,20 @@ class ScheduleAgent:
                     })
                     await redis.expire(health_key, 60)
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
-                except asyncio.CancelledError: break
-                except Exception: await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    await asyncio.sleep(5)
 
         hb_task = asyncio.create_task(heartbeat_loop())
 
         try:
-            while True:
-                result = await redis.blpop(queue_key, timeout=_BLPOP_TIMEOUT)
-                if result is None:
-                    continue
-                _, raw = result
-                asyncio.create_task(self._handle_task(raw, orchestra_url))
+            async for msg in cassiopeia.listen():
+                asyncio.create_task(self._handle_task(msg, orchestra_url, redis))
         except asyncio.CancelledError:
             logger.info("[ScheduleAgent] 종료")
         finally:
             hb_task.cancel()
+            await cassiopeia.disconnect()
             await redis.aclose()
             logger.info("[ScheduleAgent] 실행 종료")

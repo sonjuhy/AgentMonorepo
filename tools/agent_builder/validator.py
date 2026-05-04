@@ -84,8 +84,17 @@ def _check_python_run_function(code: str, result: ValidationResult) -> None:
         )
 
 
+# 허용되는 패키지 이름 패턴: 알파벳·숫자·언더스코어·대시·점, 버전 스펙 포함
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+([><=!~^]{1,2}[A-Za-z0-9_\-\.\*]+)?$")
+
+
 def _check_python_packages(packages: list[str], result: ValidationResult) -> None:
     """pip install --dry-run 으로 패키지 해석 가능 여부를 확인합니다."""
+    # 보안: 패키지 명칭이 정규식을 통과하는지 먼저 검사 (Command Injection 방지)
+    for pkg in packages:
+        if not _PACKAGE_NAME_RE.match(pkg):
+            result.fail(f"유효하지 않은 패키지 명칭: {pkg!r}")
+            return
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--dry-run", "--quiet", *packages],
@@ -172,15 +181,12 @@ def _check_js_exports(code: str, result: ValidationResult) -> None:
 
 
 def _check_npm_package_names(packages: list[str], result: ValidationResult) -> None:
-    """npm 패키지 이름 형식을 검사합니다 (실제 레지스트리 조회 없음)."""
+    """npm 패키지 이름 형식을 검사합니다."""
     # npm 패키지 이름: 소문자, 숫자, -, _, . / 또는 @scope/name 형식
     pattern = re.compile(r"^(@[a-z0-9\-_]+/)?[a-z0-9\-_.]+(@[\w\.\-]+)?$")
     for pkg in packages:
         if not pattern.match(pkg.lower()):
-            result.warn(
-                f"패키지 이름 형식이 비표준입니다: '{pkg}'. "
-                "npm install 실패 시 package.json을 직접 수정하세요."
-            )
+            result.fail(f"유효하지 않은 npm 패키지 명칭: {pkg!r}")
 
 
 # ── 공통 진입점 ───────────────────────────────────────────────────────────────

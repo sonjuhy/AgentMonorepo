@@ -1,3 +1,3 @@
-from .messaging import AgentMessage, AgentName, MessageBrokerProtocol, RedisMessageBroker
+from .messaging import AgentMessage, AgentName, MessageBrokerProtocol, CassiopeiaMessageBroker
 
-__all__ = ["AgentMessage", "AgentName", "MessageBrokerProtocol", "RedisMessageBroker"]
+__all__ = ["AgentMessage", "AgentName", "MessageBrokerProtocol", "CassiopeiaMessageBroker"]

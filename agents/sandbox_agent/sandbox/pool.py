@@ -17,7 +17,7 @@ from typing import Any
 from .models import SandboxRuntime
 from .protocols import SandboxProtocol
 
-logger = logging.getLogger("orchestra_agent.sandbox.pool")
+logger = logging.getLogger("cassiopeia_agent.sandbox.pool")
 
 _MIN_READY = int(os.environ.get("VM_POOL_MIN_READY", "3"))
 _MAX_SIZE = int(os.environ.get("VM_POOL_MAX_SIZE", "10"))

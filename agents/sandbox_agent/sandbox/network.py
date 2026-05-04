@@ -13,7 +13,7 @@ import asyncio
 import logging
 from ipaddress import IPv4Network
 
-logger = logging.getLogger("orchestra_agent.sandbox.network")
+logger = logging.getLogger("cassiopeia_agent.sandbox.network")
 
 _BASE_SUBNET = "172.16.0.0/16"
 
