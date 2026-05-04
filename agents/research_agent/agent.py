@@ -35,26 +35,27 @@ class ResearchAgent:
     def __init__(self, config: ResearchAgentConfig | None = None, provider: SearchProviderProtocol | None = None, storage=None) -> None:
         self._config = config or load_config_from_env()
 
-        primary_provider = build_search_provider(
-            provider_name=self._config.search_provider,
-            api_key=self._config.search_api_key,
-            gemini_model=self._config.gemini_model,
-            perplexity_model=self._config.perplexity_model,
-        )
-
-        if self._config.fallback_provider:
-            from .providers import FallbackSearchProvider
-            secondary_provider = build_search_provider(
-                provider_name=self._config.fallback_provider,
-                api_key=self._config.fallback_api_key,
+        if provider is None:
+            primary_provider = build_search_provider(
+                provider_name=self._config.search_provider,
+                api_key=self._config.search_api_key,
                 gemini_model=self._config.gemini_model,
                 perplexity_model=self._config.perplexity_model,
             )
-            default_provider = FallbackSearchProvider(primary_provider, secondary_provider)
-        else:
-            default_provider = primary_provider
 
-        self._provider = provider or default_provider
+            if self._config.fallback_provider:
+                from .providers import FallbackSearchProvider
+                secondary_provider = build_search_provider(
+                    provider_name=self._config.fallback_provider,
+                    api_key=self._config.fallback_api_key,
+                    gemini_model=self._config.gemini_model,
+                    perplexity_model=self._config.perplexity_model,
+                )
+                provider = FallbackSearchProvider(primary_provider, secondary_provider)
+            else:
+                provider = primary_provider
+
+        self._provider = provider
 
         # 에이전트별 LLM 설정 (환경변수 RESEARCH_AGENT_LLM_BACKEND 우선)
         self._llm_config: LLMConfig = load_llm_config_for_agent(self.agent_name)

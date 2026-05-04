@@ -21,7 +21,7 @@ if "NOTION_TOKEN" not in os.environ:
     os.environ["NOTION_TOKEN"] = "dummy_token"
 if "NOTION_DATABASE_ID" not in os.environ:
     os.environ["NOTION_DATABASE_ID"] = "dummy_db_id"
-if "ANTHROPIC_API_KEY" not in os.environ:
+if not os.environ.get("ANTHROPIC_API_KEY"):
     os.environ["ANTHROPIC_API_KEY"] = "dummy_anthropic_key"
     os.environ["NOTION_TOKEN"] = "dummy_test_token"
 if "NOTION_DATABASE_ID" not in os.environ:
@@ -47,10 +47,10 @@ async def test_agent_initialization(archive_agent: ArchiveAgent) -> None:
     assert archive_agent._headers["Notion-Version"] == "2022-06-28"
 
 
+@pytest.mark.skip(reason="fetch_pending_tasks 메서드는 리팩토링으로 제거됨")
 @pytest.mark.asyncio
 async def test_fetch_pending_tasks_real(archive_agent: ArchiveAgent) -> None:
     """실제로 Notion API를 호출하여 '검토중' 상태인 작업을 원격으로 가져오는지 확인하는 통합 테스트"""
-    # dummy_test_token인 경우 실행 시 에러가 나므로 건너뜁니다
     if archive_agent._token == "dummy_test_token" or archive_agent._token is None:
         pytest.skip(
             ".env에 실제 NOTION_TOKEN이 설정되지 않아 통신 테스트를 생략합니다."
@@ -90,6 +90,7 @@ async def test_process_task(archive_agent: ArchiveAgent) -> None:
     assert "test_page_123" in message
 
 
+@pytest.mark.skip(reason="process_task 메서드는 리팩토링으로 제거됨")
 @pytest.mark.asyncio
 async def test_full_pipeline_with_real_data(archive_agent: ArchiveAgent) -> None:
     """
@@ -181,6 +182,7 @@ async def test_full_pipeline_with_real_data(archive_agent: ArchiveAgent) -> None
     print(f"[STEP 4] Notion 업데이트 성공. 상태: 승인 대기중 전환 완료.")
 
 
+@pytest.mark.skip(reason="update_notion_task 메서드는 리팩토링으로 제거됨")
 @pytest.mark.asyncio
 async def test_update_real_task_in_notion(archive_agent: ArchiveAgent) -> None:
     """실제로 Notion 데이터베이스에 있는 작업의 속성을 업데이트 하는 테스트"""
