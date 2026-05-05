@@ -1,6 +1,6 @@
 # 🚀 노코드/바이브 코딩으로 에이전트 뚝딱 만들기 가이드
 
-오케스트라 에이전트(Orchestra Agent) 생태계에 새로운 에이전트를 추가하기 위해 **복잡한 통신 규약(Redis, HTTP, Heartbeat)을 직접 코딩할 필요는 전혀 없습니다!** 
+카시오페아 에이전트(Cassiopeia Agent) 생태계에 새로운 에이전트를 추가하기 위해 **복잡한 통신 규약(Redis, HTTP, Heartbeat)을 직접 코딩할 필요는 전혀 없습니다!** 
 
 이 가이드는 AI의 도움을 받아(Vibe Coding) **핵심 비즈니스 로직(파이썬 함수 딱 1개)만 작성**하고, 나머지는 시스템이 알아서 뼈대를 붙여 서비스로 배포하게 만드는 방법을 설명합니다.
 
@@ -60,13 +60,13 @@ python tools/agent_builder/cli.py create
 ```bash
 docker-compose up -d
 ```
-이제 슬랙에 가서 **"@OrchestraBot 요즘 IT 뉴스 좀 알려줘"** 라고 말해보세요. 방금 만든 에이전트가 응답합니다!
+이제 슬랙에 가서 **"@CassiopeiaBot 요즘 IT 뉴스 좀 알려줘"** 라고 말해보세요. 방금 만든 에이전트가 응답합니다!
 
 ---
 
 ## 🌐 방법 2: 외부 URL API로 원격 설치 (노코드)
 
-만약 터미널을 열기도 귀찮거나, 이미 서비스 중인 오케스트라 서버를 재시작하지 않고 실시간으로 에이전트를 추가하고 싶다면 **API 호출 한 방(External URL Install)**으로 끝낼 수 있습니다.
+만약 터미널을 열기도 귀찮거나, 이미 서비스 중인 카시오페아 서버를 재시작하지 않고 실시간으로 에이전트를 추가하고 싶다면 **API 호출 한 방(External URL Install)**으로 끝낼 수 있습니다.
 
 ### 1단계: 매니페스트(JSON) 파일 만들기
 AI에게 부탁해서 아래와 같은 형식의 JSON 파일을 하나 작성해달라고 합니다. 
@@ -86,8 +86,8 @@ AI에게 부탁해서 아래와 같은 형식의 JSON 파일을 하나 작성해
 
 이 파일을 Github Gist나 임의의 웹 서버에 올립니다. (예: `https://my-server.com/crypto_agent.json`)
 
-### 2단계: 오케스트라에게 설치 명령 내리기 (API 호출)
-Postman 도구나 터미널(curl)을 이용해 오케스트라의 API를 찌릅니다. 서버 재시작 없이 즉시 빌드되고 오케스트라의 NLU 두뇌에 추가됩니다.
+### 2단계: 카시오페아에게 설치 명령 내리기 (API 호출)
+Postman 도구나 터미널(curl)을 이용해 카시오페아의 API를 찌릅니다. 서버 재시작 없이 즉시 빌드되고 카시오페아의 NLU 두뇌에 추가됩니다.
 
 ```bash
 curl -X POST http://localhost:8001/marketplace/install \
@@ -99,7 +99,7 @@ curl -X POST http://localhost:8001/marketplace/install \
   }'
 ```
 
-**동작 원리:** 오케스트라가 저 JSON 파일을 읽어옵니다 -> 내부적으로 폴더를 만들고 Docker 이미지를 동적으로 굽습니다(Build) -> 컨테이너를 실행하고 큐에 연결시킵니다 -> NLU 엔진에게 "이제 암호화폐 가격 물어보면 얘한테 시켜!" 라고 똑똑하게 업데이트합니다.
+**동작 원리:** 카시오페아가 저 JSON 파일을 읽어옵니다 -> 내부적으로 폴더를 만들고 Docker 이미지를 동적으로 굽습니다(Build) -> 컨테이너를 실행하고 큐에 연결시킵니다 -> NLU 엔진에게 "이제 암호화폐 가격 물어보면 얘한테 시켜!" 라고 똑똑하게 업데이트합니다.
 
 ---
 
@@ -108,6 +108,6 @@ curl -X POST http://localhost:8001/marketplace/install \
 노코드/바이브 코딩으로 짠 `code` 부분(즉, `run(params)` 함수)은 반드시 다음 2가지를 지켜야 합니다.
 
 1.  **함수 시그니처:** 반드시 비동기 함수 `async def run(params: dict) -> dict:` 형태로 작성해야 합니다.
-2.  **리턴 포맷:** 반환하는 딕셔너리는 오케스트라가 이해할 수 있도록 최소한 `status`와 `result_data`를 포함해야 합니다.
+2.  **리턴 포맷:** 반환하는 딕셔너리는 카시오페아가 이해할 수 있도록 최소한 `status`와 `result_data`를 포함해야 합니다.
     *   **성공 시:** `{"status": "COMPLETED", "result_data": {"자유로운": "데이터", "summary": "슬랙에 보여줄 간단한 요약"}}`
     *   **실패 시:** `{"status": "FAILED", "error": {"code": "MY_ERROR", "message": "왜 실패했는지 이유"}}`

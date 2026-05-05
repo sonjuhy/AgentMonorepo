@@ -81,11 +81,11 @@ class TestManagerVerification:
             "content": "테스트",
             "source": "slack",
         })
-        await fake_redis.rpush("agent:orchestra:tasks", json.dumps(task))
+        await fake_redis.rpush("agent:cassiopeia:tasks", json.dumps(task))
 
         # 서명 검증 통과 확인 — DispatchAuthError 없이 파싱 가능
         from shared_core.dispatch_auth import verify_task
-        raw = await fake_redis.lpop("agent:orchestra:tasks")
+        raw = await fake_redis.lpop("agent:cassiopeia:tasks")
         parsed = json.loads(raw)
         verify_task(parsed)  # 예외 없어야 함
 
@@ -103,11 +103,11 @@ class TestManagerVerification:
             "source": "slack",
             "_hmac": "a" * 64,  # 위조 서명
         }
-        await fake_redis.rpush("agent:orchestra:tasks", json.dumps(tampered_task))
+        await fake_redis.rpush("agent:cassiopeia:tasks", json.dumps(tampered_task))
 
         # manager의 _verify_and_parse를 직접 호출해 검증
         from shared_core.dispatch_auth import DispatchAuthError, verify_task
-        raw = await fake_redis.lpop("agent:orchestra:tasks")
+        raw = await fake_redis.lpop("agent:cassiopeia:tasks")
         parsed = json.loads(raw)
         with pytest.raises(DispatchAuthError):
             verify_task(parsed)

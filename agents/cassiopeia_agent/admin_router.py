@@ -1,5 +1,5 @@
 """
-Orchestra Agent 관리자 API 라우터  (GUI 외부 제어 전용)
+Cassiopeia Agent 관리자 API 라우터  (GUI 외부 제어 전용)
 
 접두사: /admin
 
@@ -176,7 +176,7 @@ class DLQReplayBody(BaseModel):
 
 
 class SandboxKeyGenerateBody(BaseModel):
-    label: str = Field(..., description="키 식별을 위한 라벨 (예: 'prod-orchestra')")
+    label: str = Field(..., description="키 식별을 위한 라벨 (예: 'prod-cassiopeia')")
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────────────
@@ -852,7 +852,7 @@ async def broadcast_message(body: BroadcastBody) -> dict[str, Any]:
     pushed: list[str] = []
     for agent_name in targets:
         msg = _AgentMessage(
-            sender="orchestra",
+            sender="cassiopeia",
             receiver=agent_name,
             action="broadcast",
             payload={
@@ -876,8 +876,8 @@ async def broadcast_message(body: BroadcastBody) -> dict[str, Any]:
 # DLQ 관리
 # ══════════════════════════════════════════════════════════════════════════════
 
-_DLQ_KEY = "orchestra:dlq"
-_ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
+_DLQ_KEY = "cassiopeia:dlq"
+_CASSIOPEIA_TASKS_KEY = "agent:cassiopeia:tasks"
 
 
 @router.get("/dlq", summary="DLQ 항목 목록 조회")
@@ -901,7 +901,7 @@ async def list_dlq(
 
 @router.post("/dlq/replay", summary="DLQ 태스크 재처리")
 async def replay_dlq_task(body: DLQReplayBody) -> dict[str, Any]:
-    """DLQ에서 특정 task_id 항목을 찾아 오케스트라 큐로 재삽입합니다."""
+    """DLQ에서 특정 task_id 항목을 찾아 카시오페아 큐로 재삽입합니다."""
     total = await ctx.redis_client.llen(_DLQ_KEY)
     raw_items = await ctx.redis_client.lrange(_DLQ_KEY, 0, total - 1)
 
@@ -924,7 +924,7 @@ async def replay_dlq_task(body: DLQReplayBody) -> dict[str, Any]:
             detail=f"DLQ에서 task_id='{body.task_id}'를 찾을 수 없습니다.",
         )
 
-    # 재처리를 위해 오케스트라에 Pub/Sub으로 재전달
+    # 재처리를 위해 카시오페아에 Pub/Sub으로 재전달
     from cassiopeia_sdk.client import AgentMessage as _AgentMessage
     replay_task = {
         "task_id": target_entry.get("task_id"),
@@ -936,11 +936,11 @@ async def replay_dlq_task(body: DLQReplayBody) -> dict[str, Any]:
     }
     replay_msg = _AgentMessage(
         sender="admin",
-        receiver="orchestra",
+        receiver="cassiopeia",
         action="user_request",
         payload=replay_task,
     )
-    await ctx.redis_client.publish("agent:orchestra", replay_msg.to_json())
+    await ctx.redis_client.publish("agent:cassiopeia", replay_msg.to_json())
 
     # DLQ에서 해당 항목 제거 (lrem: 첫 번째 일치 항목 1개 제거)
     if target_raw:

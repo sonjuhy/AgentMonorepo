@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agents.cassiopeia_agent.scheduler import ScheduledTaskRunner, _ORCHESTRA_CHANNEL
+from agents.cassiopeia_agent.scheduler import ScheduledTaskRunner, _CASSIOPEIA_CHANNEL
 
-_SCHEDULED_KEY = "orchestra:scheduled_tasks"
+_SCHEDULED_KEY = "cassiopeia:scheduled_tasks"
 
 
 @pytest.fixture
@@ -106,7 +106,7 @@ class TestListPending:
 # ── _dispatch_due_task ────────────────────────────────────────────────────────
 
 class TestDispatchDueTask:
-    async def test_publishes_task_to_orchestra_channel(self, scheduler, fake_redis):
+    async def test_publishes_task_to_cassiopeia_channel(self, scheduler, fake_redis):
         fake_redis.publish = AsyncMock(return_value=1)
         entry = json.dumps({
             "schedule_id": "sid-1",
@@ -116,7 +116,7 @@ class TestDispatchDueTask:
         await scheduler._dispatch_due_task(entry, time.time())
         fake_redis.publish.assert_called_once()
         channel, _ = fake_redis.publish.call_args.args
-        assert channel == _ORCHESTRA_CHANNEL
+        assert channel == _CASSIOPEIA_CHANNEL
 
     async def test_dispatched_task_has_new_task_id(self, scheduler, fake_redis):
         published_payloads: list[str] = []

@@ -1,9 +1,9 @@
 """
 소통 에이전트 구체 구현체 (v3 - SlackCommAgent)
 - Slack API와 Redis 사이의 양방향 게이트웨이
-- Inbound:  Slack → on_user_request → cassiopeia Pub/Sub agent:orchestra
+- Inbound:  Slack → on_user_request → cassiopeia Pub/Sub agent:cassiopeia
 - Outbound: cassiopeia Pub/Sub agent:communication → listen_system_results → Slack
-- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis orchestra:approval:{task_id}
+- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis cassiopeia:approval:{task_id}
 - Notion 알림 발송 기능 유지 (fetch_notifications / run)
 """
 
@@ -23,7 +23,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from ..models import (
     ApprovalFeedback,
     ExecutionResult,
-    OrchestraResult,
+    CassiopeiaResult,
     ParsedTask,
     RawPayload,
     SlackEvent,
@@ -71,8 +71,8 @@ class SlackCommAgent:
     소통 에이전트 (Communication Agent) 구체 구현체.
 
     역할:
-        - 사용자 Slack 메시지를 수신하여 오케스트라 Redis 큐로 전달
-        - 오케스트라 처리 결과를 Redis에서 수신하여 Slack으로 렌더링
+        - 사용자 Slack 메시지를 수신하여 카시오페아 Redis 큐로 전달
+        - 카시오페아 처리 결과를 Redis에서 수신하여 Slack으로 렌더링
         - 승인/반려 버튼 UI 제공 및 피드백 Redis 전달
         - Notion 승인 대기 태스크 알림 발송 (기존 기능 유지)
 
@@ -105,7 +105,7 @@ class SlackCommAgent:
                 None이면 REDIS_URL 환경변수로 새로 생성합니다.
                 Redis 없이도 Notion 알림 기능은 동작합니다.
             cassiopeia (CassiopeiaClient | None):
-                외부 주입 CassiopeiaClient (오케스트라 Pub/Sub 통신 전용).
+                외부 주입 CassiopeiaClient (카시오페아 Pub/Sub 통신 전용).
                 None이면 REDIS_URL 환경변수로 자동 생성합니다.
         """
         self._notion_token: str = os.environ.get("NOTION_TOKEN", "")
@@ -148,7 +148,7 @@ class SlackCommAgent:
 
     async def on_user_request(self, event: SlackEvent, say: Any) -> None:
         """
-        Slack 메시지를 수신하여 정제 후 오케스트라 Redis 큐로 전달합니다.
+        Slack 메시지를 수신하여 정제 후 카시오페아 Redis 큐로 전달합니다.
 
         변경 사항:
             - 세션 단위 스레드 캐싱 제거
@@ -192,12 +192,12 @@ class SlackCommAgent:
             "thread_ts": thread_ts,
         }
 
-        # cassiopeia Pub/Sub으로 오케스트라에 전달 (서명 포함)
+        # cassiopeia Pub/Sub으로 카시오페아에 전달 (서명 포함)
         cassiopeia = await self._ensure_cassiopeia()
         await cassiopeia.send_message(
             action="user_request",
             payload=sign_task(task),
-            receiver="orchestra",
+            receiver="cassiopeia",
         )
 
         # 태스크 컨텍스트 저장 (결과 수신 시 정확한 채널/스레드로 복원)
@@ -209,7 +209,7 @@ class SlackCommAgent:
         })
 
         logger.info(
-            "[CommAgent] 오케스트라 전달 — task_id=%s user=%s thread_ts=%s",
+            "[CommAgent] 카시오페아 전달 — task_id=%s user=%s thread_ts=%s",
             task_id,
             user_id,
             thread_ts,
@@ -220,7 +220,7 @@ class SlackCommAgent:
     async def listen_system_results(self) -> None:
         """
         cassiopeia Pub/Sub agent:communication 채널을 구독하여
-        오케스트라 결과를 Slack Block Kit으로 렌더링합니다.
+        카시오페아 결과를 Slack Block Kit으로 렌더링합니다.
         """
         if self._redis is None:
             logger.warning("[CommAgent] Redis 미설정 — listen_system_results 종료")
@@ -243,7 +243,7 @@ class SlackCommAgent:
             pass
 
     async def _heartbeat_loop(self) -> None:
-        """15초마다 Orchestra Agent에 생존 신호를 기록합니다 (유효 시간 30초)."""
+        """15초마다 Cassiopeia Agent에 생존 신호를 기록합니다 (유효 시간 30초)."""
         from datetime import datetime, timezone
         logger.info("[CommAgent] 하트비트 루프 시작 (agent=%s)", self.agent_name)
         while True:
@@ -267,7 +267,7 @@ class SlackCommAgent:
 
     async def _handle_system_result(self, result: dict[str, Any]) -> None:
         """
-        수신된 OrchestraResult를 파싱하고 Slack으로 전송합니다.
+        수신된 CassiopeiaResult를 파싱하고 Slack으로 전송합니다.
         """
         task_id: str = result.get("task_id", "")
         content: str = result.get("content", "")

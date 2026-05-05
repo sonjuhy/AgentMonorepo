@@ -93,8 +93,8 @@ class SetupWizard:
         self.config["ENCRYPTION_KEY"] = enc_key if enc_key else base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
         
         # Redis passwords
-        redis_orch = input("REDIS_ORCHESTRA_PASSWORD (입력하지 않으면 자동 생성): ").strip()
-        self.config["REDIS_ORCHESTRA_PASSWORD"] = redis_orch if redis_orch else secrets.token_hex(16)
+        redis_orch = input("REDIS_CASSIOPEIA_PASSWORD (입력하지 않으면 자동 생성): ").strip()
+        self.config["REDIS_CASSIOPEIA_PASSWORD"] = redis_orch if redis_orch else secrets.token_hex(16)
         
         redis_comm = input("REDIS_COMMUNITY_PASSWORD (입력하지 않으면 자동 생성): ").strip()
         self.config["REDIS_COMMUNITY_PASSWORD"] = redis_comm if redis_comm else secrets.token_hex(16)

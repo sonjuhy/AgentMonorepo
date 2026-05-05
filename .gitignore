@@ -213,3 +213,4 @@ agent_local_storage.db
 fix_tests.py
 sqlite_db.db
 *.db
+.agent

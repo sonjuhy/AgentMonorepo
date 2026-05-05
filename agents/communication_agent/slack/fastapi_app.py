@@ -189,7 +189,7 @@ async def lifespan(app: FastAPI):
         """
         Slack 채널 메시지 이벤트를 수신합니다.
         - 인메모리 저장 및 SSE 브로드캐스트
-        - Redis 활성화 시: SlackCommAgent.on_user_request → 오케스트라 큐 전달
+        - Redis 활성화 시: SlackCommAgent.on_user_request → 카시오페아 큐 전달
         - Redis 비활성화 시: LLM 분류 → Docker 컨테이너 디스패치 (폴백)
         """
         if not event.get("subtype") and not event.get("bot_id"):
@@ -206,7 +206,7 @@ async def lifespan(app: FastAPI):
             slack_event["text"],
         )
 
-        # ── Redis 활성화 경로: 소통 에이전트 → 오케스트라 큐 ──
+        # ── Redis 활성화 경로: 소통 에이전트 → 카시오페아 큐 ──
         if _ctx.redis is not None and _ctx.comm_agent is not None:
             await _ctx.comm_agent.on_user_request(slack_event, say)
             return
@@ -235,19 +235,19 @@ async def lifespan(app: FastAPI):
 
     @bolt_app.action("approve_task")
     async def handle_approve(ack: Any, body: dict, say: Any) -> None:
-        """[승인] 버튼 클릭 처리: 오케스트라에 승인 신호를 전달합니다."""
+        """[승인] 버튼 클릭 처리: 카시오페아에 승인 신호를 전달합니다."""
         await ack()
         await _handle_approval_action(body, action="approve", say=say)
 
     @bolt_app.action("request_revision")
     async def handle_revision(ack: Any, body: dict, say: Any) -> None:
-        """[수정 요청] 버튼 클릭 처리: 피드백을 오케스트라에 전달합니다."""
+        """[수정 요청] 버튼 클릭 처리: 피드백을 카시오페아에 전달합니다."""
         await ack()
         await _handle_approval_action(body, action="request_revision", say=say)
 
     @bolt_app.action("cancel_task")
     async def handle_cancel(ack: Any, body: dict, say: Any) -> None:
-        """[취소] 버튼 클릭 처리: 작업 취소 신호를 오케스트라에 전달합니다."""
+        """[취소] 버튼 클릭 처리: 작업 취소 신호를 카시오페아에 전달합니다."""
         await ack()
         await _handle_approval_action(body, action="cancel", say=say)
 
@@ -323,7 +323,7 @@ async def _handle_approval_action(
 ) -> None:
     """
     승인/수정 요청/취소 버튼 클릭에 대한 공통 처리 로직.
-    task_id로 컨텍스트를 복원하고 오케스트라에 피드백을 전달합니다.
+    task_id로 컨텍스트를 복원하고 카시오페아에 피드백을 전달합니다.
     """
     if _ctx.redis is None or _ctx.comm_agent is None:
         logger.warning("[action] Redis 미설정 — 승인 액션 처리 불가")

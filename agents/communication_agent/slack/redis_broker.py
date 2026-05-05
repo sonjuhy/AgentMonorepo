@@ -14,8 +14,8 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger("slack_agent.redis_broker")
 
-# 승인 피드백은 태스크별 큐를 사용 (오케스트라와 일치)
-_APPROVAL_KEY_PREFIX = "orchestra:approval:"
+# 승인 피드백은 태스크별 큐를 사용 (카시오페아와 일치)
+_APPROVAL_KEY_PREFIX = "cassiopeia:approval:"
 
 # 세션 TTL: 2시간
 _SESSION_TTL = 7200
@@ -43,11 +43,11 @@ class RedisBroker:
 
     async def push_approval(self, feedback: dict[str, Any]) -> None:
         """
-        사용자 승인/반려 피드백을 orchestra:approval:{task_id} 큐에 삽입합니다.
+        사용자 승인/반려 피드백을 cassiopeia:approval:{task_id} 큐에 삽입합니다.
 
-        오케스트라는 태스크별 큐(orchestra:approval:{approval_task_id})에서
-        BLPOP으로 승인 응답을 대기합니다. 단일 큐(orchestra:results)에 push하면
-        오케스트라가 응답을 수신하지 못하므로 반드시 task_id별 큐를 사용합니다.
+        카시오페아는 태스크별 큐(cassiopeia:approval:{approval_task_id})에서
+        BLPOP으로 승인 응답을 대기합니다. 단일 큐(cassiopeia:results)에 push하면
+        카시오페아가 응답을 수신하지 못하므로 반드시 task_id별 큐를 사용합니다.
 
         Args:
             feedback (dict): ApprovalFeedback 스키마 딕셔너리.

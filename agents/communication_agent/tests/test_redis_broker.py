@@ -18,7 +18,7 @@ async def test_push_approval(broker, fake_redis):
     }
     await broker.push_approval(feedback)
     
-    val = await fake_redis.lpop("orchestra:approval:task-123")
+    val = await fake_redis.lpop("cassiopeia:approval:task-123")
     assert val is not None
     data = json.loads(val)
     assert data["action"] == "approve"
@@ -28,7 +28,7 @@ async def test_push_approval_no_task_id(broker, fake_redis):
     feedback = {"action": "approve"}
     await broker.push_approval(feedback)
     # Should not push anywhere if task_id is missing
-    keys = await fake_redis.keys("orchestra:approval:*")
+    keys = await fake_redis.keys("cassiopeia:approval:*")
     assert len(keys) == 0
 
 @pytest.mark.asyncio

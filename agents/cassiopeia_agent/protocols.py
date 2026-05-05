@@ -1,5 +1,5 @@
 """
-오케스트라 에이전트 추상 인터페이스 (Protocol)
+카시오페아 에이전트 추상 인터페이스 (Protocol)
 - python-strict-typing 전략: Protocol 기반 다형성
 """
 
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .models import AgentResult, NLUResult, OrchestraTask
+from .models import AgentResult, NLUResult, CassiopeiaTask
 
 
 class NLUEngineProtocol(Protocol):
@@ -92,18 +92,18 @@ class HealthMonitorProtocol(Protocol):
         ...
 
 
-class OrchestraManagerProtocol(Protocol):
-    """오케스트라 매니저 메인 인터페이스"""
+class CassiopeiaManagerProtocol(Protocol):
+    """카시오페아 매니저 메인 인터페이스"""
 
     async def listen_tasks(self) -> None:
         """
-        agent:orchestra:tasks 큐를 BLPOP으로 감시하는 메인 루프입니다.
+        agent:cassiopeia:tasks 큐를 BLPOP으로 감시하는 메인 루프입니다.
         각 태스크를 비동기 Task로 처리합니다.
         FastAPI lifespan에서 백그라운드 태스크로 실행됩니다.
         """
         ...
 
-    async def process_task(self, task: OrchestraTask) -> None:
+    async def process_task(self, task: CassiopeiaTask) -> None:
         """
         단일 태스크 처리 파이프라인 (NLU → Plan → Dispatch → Monitor).
 
@@ -114,7 +114,7 @@ class OrchestraManagerProtocol(Protocol):
 
     async def receive_agent_result(self, result: AgentResult) -> None:
         """
-        하위 에이전트로부터 결과를 수신하여 orchestra:results:{task_id} 큐에 push합니다.
+        하위 에이전트로부터 결과를 수신하여 cassiopeia:results:{task_id} 큐에 push합니다.
         FastAPI POST /results 엔드포인트에서 호출됩니다.
 
         Args:

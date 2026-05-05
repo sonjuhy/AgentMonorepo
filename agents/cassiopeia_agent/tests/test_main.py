@@ -85,7 +85,7 @@ class TestSubmitTask:
         await async_client.post("/tasks", json={"content": "테스트", "user_id": "u1", "channel_id": "c1"})
         app_context.ctx.cassiopeia_client.send_message.assert_awaited_once()
         kwargs = app_context.ctx.cassiopeia_client.send_message.call_args.kwargs
-        assert kwargs["receiver"] == "orchestra"
+        assert kwargs["receiver"] == "cassiopeia"
         assert kwargs["action"] == "user_request"
 
     async def test_custom_session_id(self, async_client):
@@ -137,7 +137,7 @@ class TestReceiveResult:
             "error": None,
             "usage_stats": {},
         })
-        raw = await fake_redis.lpop("orchestra:results:task-res-1")
+        raw = await fake_redis.lpop("cassiopeia:results:task-res-1")
         assert raw is not None
         assert json.loads(raw)["status"] == "COMPLETED"
 

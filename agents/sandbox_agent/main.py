@@ -186,7 +186,7 @@ async def run_cli():
         result = await vm.execute(req.params)
         await vm.close()
         
-        # 결과를 stdout으로 출력 (오케스트라가 캡처)
+        # 결과를 stdout으로 출력 (카시오페아가 캡처)
         print(json.dumps({
             "status": "SUCCESS",
             "result_data": result

@@ -73,11 +73,11 @@ async def test_on_user_request_success(agent, mock_redis, mock_cassiopeia, mock_
         thread_ts="111.0",
         text="⏳ 요청을 접수했습니다. 처리 중입니다..."
     )
-    # cassiopeia should send to orchestra with signed task payload
+    # cassiopeia should send to cassiopeia with signed task payload
     mock_cassiopeia.send_message.assert_called_once()
     call_kwargs = mock_cassiopeia.send_message.call_args.kwargs
     assert call_kwargs["action"] == "user_request"
-    assert call_kwargs["receiver"] == "orchestra"
+    assert call_kwargs["receiver"] == "cassiopeia"
     payload = call_kwargs["payload"]
     assert payload["content"] == "help"
     assert payload["requester"]["user_id"] == "U1"

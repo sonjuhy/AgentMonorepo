@@ -62,24 +62,24 @@ class ParsedTask(TypedDict):
 
 # ── Redis 기반 메시지 브로커 스키마 ──────────────────────────────────────────────
 
-class OrchestraTaskRequester(TypedDict):
-    """오케스트라 태스크 요청자 정보"""
+class CassiopeiaTaskRequester(TypedDict):
+    """카시오페아 태스크 요청자 정보"""
     user_id: str
     channel_id: str
 
 
-class OrchestraTask(TypedDict):
-    """소통 에이전트 → Redis → 오케스트라 전달 메시지 스키마"""
+class CassiopeiaTask(TypedDict):
+    """소통 에이전트 → Redis → 카시오페아 전달 메시지 스키마"""
     task_id: str
-    session_id: str        # 오케스트라 NLU 컨텍스트 주입용 (format: user_id:channel_id)
-    requester: OrchestraTaskRequester
+    session_id: str        # 카시오페아 NLU 컨텍스트 주입용 (format: user_id:channel_id)
+    requester: CassiopeiaTaskRequester
     content: str
     source: str            # 항상 "slack"
     thread_ts: str | None  # 스레드 루트 ts (세션 연속성용)
 
 
-class OrchestraResult(TypedDict):
-    """오케스트라 → Redis → 소통 에이전트 결과 메시지 스키마"""
+class CassiopeiaResult(TypedDict):
+    """카시오페아 → Redis → 소통 에이전트 결과 메시지 스키마"""
     task_id: str
     content: str
     requires_user_approval: bool

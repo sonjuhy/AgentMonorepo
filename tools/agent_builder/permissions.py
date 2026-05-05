@@ -131,7 +131,7 @@ class ContainerPermissions:
     def standard(cls) -> ContainerPermissions:
         """
         표준 권한 — 내부 네트워크, 읽기 전용 FS, 512MB. (기본값)
-        Redis·OrchestraManager 통신이 필요한 일반 에이전트에 적합합니다.
+        Redis·CassiopeiaManager 통신이 필요한 일반 에이전트에 적합합니다.
         """
         return cls()  # 모든 필드가 기본값
 

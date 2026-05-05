@@ -34,27 +34,11 @@ _USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "Asia/Seoul")
 
 # ── 에이전트 능력 레지스트리 ──────────────────────────────────────────────────────
 
-_AGENT_CAPABILITIES = """
-- archive_agent: Notion/Obsidian 자료 조회, 저장 및 반환 (Archive Hub)
-  - actions:
-    - list_databases: 연결된 모든 노션 데이터베이스 목록 조회
-    - get_database_schema: 특정 데이터베이스의 컬럼 구조 및 타입 파악 (params: database_id)
-    - query_database: 데이터베이스 내 아이템 목록(데이터 전체)을 가져올 때 사용 (params: database_id[선택])
-    - get_page: 특정 낱개 페이지의 상세 내용을 볼 때 사용 (params: page_id[필수])
-    - create_page: 노션에 새 페이지를 생성하거나 내용을 저장할 때 사용 (params: title[필수], database_id[선택], content[선택]) - "저장해줘", "기록해줘", "노션에 써줘" 등의 요청에 사용
-    - search: 노션/옵시디언 전체에서 검색 (params: query)
-    - read_file: 옵시디언 파일 내용 읽기 (params: page_id)
-    - analyze_task: (Legacy) 노션 태스크 기획안 생성
-
-- schedule_agent: 구글 캘린더 일정 관리 (actions: list_schedules, add_schedule, modify_schedule, remove_schedule)
-- research_agent: 웹 검색 및 정보 수집 (actions: investigate)
-- file_agent: 로컬 파일 시스템 관리 (actions: read_file, write_file, search_files)
-- communication_agent: 사용자 질문 및 응답 (actions: ask_clarification)
-""".strip()
+_AGENT_CAPABILITIES = "- 등록된 에이전트가 없습니다."
 
 _SYSTEM_PROMPT_TEMPLATE = """\
-# Role: AI Orchestra Agent (Chief Coordinator)
-당신은 독립적인 전문 에이전트들로 구성된 오케스트라의 지휘자입니다.
+# Role: AI Cassiopeia Agent (Chief Coordinator)
+당신은 독립적인 전문 에이전트들로 구성된 카시오페아의 지휘자입니다.
 사용자의 메시지를 분석하여 다음의 JSON 규격에 맞게 [의도 파악 - 에이전트 선택 - 파라미터 추출]을 수행하세요.
 현재 날짜와 시간: {current_datetime}
 사용자 타임존: {user_timezone}

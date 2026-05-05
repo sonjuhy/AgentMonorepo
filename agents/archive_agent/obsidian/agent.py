@@ -174,7 +174,7 @@ class ObsidianAgent:
             res_data["reference_id"] = ref_id
             res_data["payload_summary"] = res_data["summary"]
             
-            # 오케스트라 큐 오버헤드를 줄이기 위해 raw_data 삭제
+            # 카시오페아 큐 오버헤드를 줄이기 위해 raw_data 삭제
             res_data.pop("raw_data", None)
 
             return {"task_id": task_id, "status": "COMPLETED", "result_data": res_data, "error": None, "usage_stats": {}}

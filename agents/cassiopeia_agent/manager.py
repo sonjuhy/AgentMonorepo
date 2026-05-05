@@ -1,7 +1,7 @@
 """
-오케스트라 매니저 (OrchestraManager)
+카시오페아 매니저 (CassiopeiaManager)
 - NLU → Plan → Dispatch → Monitor 전체 파이프라인
-- Redis agent:orchestra:tasks 큐 수신 및 세션/스레드 기반 컨텍스트 관리
+- Redis agent:cassiopeia:tasks 큐 수신 및 세션/스레드 기반 컨텍스트 관리
 - SQLite 영구 저장소 연동 (StateManager)
 """
 
@@ -32,7 +32,7 @@ from .models import (
     DispatchMessage,
     MultiStepNLUResult,
     NLUResult,
-    OrchestraTask,
+    CassiopeiaTask,
     PlanStep,
     RetryInfo,
     SingleNLUResult,
@@ -73,10 +73,10 @@ def _requires_approval(action: str, llm_flag: bool) -> bool:
 
 
 # Redis 설정
-_ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
-_RESULTS_KEY_PREFIX = "orchestra:results:"
-_APPROVAL_KEY_PREFIX = "orchestra:approval:"
-_DLQ_KEY = "orchestra:dlq"
+_CASSIOPEIA_TASKS_KEY = "agent:cassiopeia:tasks"
+_RESULTS_KEY_PREFIX = "cassiopeia:results:"
+_APPROVAL_KEY_PREFIX = "cassiopeia:approval:"
+_DLQ_KEY = "cassiopeia:dlq"
 _MSG_VERSION = "1.1"
 _APPROVAL_TIMEOUT_SEC: int = int(os.environ.get("APPROVAL_TIMEOUT_SEC", "300"))
 _BLPOP_TIMEOUT: int = int(os.environ.get("BLPOP_TIMEOUT", "5"))
@@ -157,9 +157,9 @@ def resolve_placeholders(params: dict[str, Any], results: dict[int, dict[str, An
         return params
 
 
-class OrchestraManager:
+class CassiopeiaManager:
     """
-    오케스트라 에이전트 메인 관제 클래스.
+    카시오페아 에이전트 메인 관제 클래스.
     """
 
     def __init__(
@@ -182,7 +182,7 @@ class OrchestraManager:
         self._health = health_monitor or HealthMonitor(redis_client=self._redis)
         self._sandbox_tool: SandboxTool | None = sandbox_tool
         self.scheduler = ScheduledTaskRunner(redis_client=self._redis)
-        self._cassiopeia = cassiopeia or CassiopeiaClient(agent_id="orchestra", redis_url=redis_url)
+        self._cassiopeia = cassiopeia or CassiopeiaClient(agent_id="cassiopeia", redis_url=redis_url)
         self._llm_gateway = None  # LLMGatewayHandler — lifespan에서 주입
 
     async def start_background_tasks(self) -> list[asyncio.Task]:
@@ -191,16 +191,16 @@ class OrchestraManager:
             asyncio.create_task(self._health.monitor_loop(), name="health_monitor"),
             asyncio.create_task(self.scheduler.run_loop(), name="scheduler"),
         ]
-        logger.info("[OrchestraManager] 백그라운드 태스크 시작 (health_monitor, scheduler)")
+        logger.info("[CassiopeiaManager] 백그라운드 태스크 시작 (health_monitor, scheduler)")
         return tasks
 
     async def listen_tasks(self) -> None:
         """메인 루프: cassiopeia Pub/Sub에서 작업을 수신합니다."""
-        logger.info("[OrchestraManager] 메인 루프 시작")
+        logger.info("[CassiopeiaManager] 메인 루프 시작")
         await self._cassiopeia.connect()
         try:
             async for msg in self._cassiopeia.listen():
-                task: OrchestraTask = dict(msg.payload)
+                task: CassiopeiaTask = dict(msg.payload)
                 action: str = getattr(msg, "action", "user_request")
 
                 if action == "llm_call":
@@ -210,9 +210,9 @@ class OrchestraManager:
                 try:
                     verify_task(task)
                 except DispatchAuthError as exc:
-                    logger.error("[OrchestraManager] 서명 검증 실패 — DLQ로 이동: %s", exc)
+                    logger.error("[CassiopeiaManager] 서명 검증 실패 — DLQ로 이동: %s", exc)
                     await self._redis.rpush(
-                        "orchestra:dlq",
+                        "cassiopeia:dlq",
                         json.dumps({
                             "id": str(uuid.uuid4()),
                             "reason": "INVALID_SIGNATURE",
@@ -232,20 +232,20 @@ class OrchestraManager:
         """액션 유형에 따라 메시지를 적절한 핸들러로 라우팅합니다."""
         if action == "llm_call":
             if self._llm_gateway is None:
-                logger.warning("[OrchestraManager] LLM Gateway 미초기화 — llm_call 무시")
+                logger.warning("[CassiopeiaManager] LLM Gateway 미초기화 — llm_call 무시")
                 return
             await self._llm_gateway.handle(payload)
         else:
             await self.process_task(payload)
 
-    async def _safe_process_task(self, task: OrchestraTask) -> None:
+    async def _safe_process_task(self, task: CassiopeiaTask) -> None:
         try:
             await self.process_task(task)
         except Exception as exc:
-            logger.exception("[OrchestraManager] 태스크 처리 실패: %s", exc)
+            logger.exception("[CassiopeiaManager] 태스크 처리 실패: %s", exc)
             await self._send_error_to_user(task, str(exc))
 
-    async def process_task(self, task: OrchestraTask) -> None:
+    async def process_task(self, task: CassiopeiaTask) -> None:
         """NLU → Plan → Dispatch → Monitor 파이프라인"""
         user_text = task.get("content", "")
         requester = task.get("requester", {})
@@ -279,7 +279,7 @@ class OrchestraManager:
         )
 
         if nlu_result.type == "direct_response":
-            await self._send_to_comm_agent(task, nlu_result.params["answer"], False, "orchestra")
+            await self._send_to_comm_agent(task, nlu_result.params["answer"], False, "cassiopeia")
         elif nlu_result.type == "clarification":
             await self._route_clarification(nlu_result, task)
         elif nlu_result.type == "multi_step":
@@ -287,13 +287,13 @@ class OrchestraManager:
         else:
             await self._route_single(nlu_result, task)
 
-    async def _route_clarification(self, nlu_result: Any, task: OrchestraTask) -> None:
+    async def _route_clarification(self, nlu_result: Any, task: CassiopeiaTask) -> None:
         content = nlu_result.params.question
         if nlu_result.params.options:
             content += "\n\n" + "\n".join(f"• {opt}" for opt in nlu_result.params.options)
         await self._send_to_comm_agent(task, content, False, "communication_agent")
 
-    async def _route_single(self, nlu_result: SingleNLUResult, task: OrchestraTask) -> None:
+    async def _route_single(self, nlu_result: SingleNLUResult, task: CassiopeiaTask) -> None:
         agent_name = nlu_result.selected_agent
         dispatch_task_id = str(uuid.uuid4())
 
@@ -315,15 +315,15 @@ class OrchestraManager:
         if needs_approval:
             approval_msg = f"다음 작업을 실행하시겠습니까?\n- 에이전트: {agent_name}\n- 액션: {nlu_result.action}\n- 파라미터: {json.dumps(nlu_result.params, ensure_ascii=False)}"
             # 임시 Result 모방 객체 (request_user_approval의 호환성 유지)
-            fake_result = {"agent": "orchestra", "result_data": {"summary": approval_msg}}
+            fake_result = {"agent": "cassiopeia", "result_data": {"summary": approval_msg}}
             if not await self.request_user_approval(fake_result, task):
-                await self._send_to_comm_agent(task, "사용자에 의해 작업이 취소되었습니다.", False, "orchestra")
+                await self._send_to_comm_agent(task, "사용자에 의해 작업이 취소되었습니다.", False, "cassiopeia")
                 return
 
         result = await self._execute_agent_task(agent_name, dispatch_task_id, dispatch, timeout)
         await self._handle_agent_result(result, task, False)  # 실행 후에는 승인 요청 안함
 
-    async def run_plan(self, nlu_result: MultiStepNLUResult, original_task: OrchestraTask) -> None:
+    async def run_plan(self, nlu_result: MultiStepNLUResult, original_task: CassiopeiaTask) -> None:
         plan = nlu_result.plan
         results: dict[int, dict[str, Any]] = {}
         total_steps = len(plan)
@@ -344,9 +344,9 @@ class OrchestraManager:
 
             if step_needs_approval:
                 approval_msg = f"다음 작업을 실행하시겠습니까?\n- 에이전트: {step.selected_agent}\n- 액션: {step.action}\n- 파라미터: {json.dumps(params, ensure_ascii=False)}"
-                fake_result = {"agent": "orchestra", "result_data": {"summary": approval_msg}}
+                fake_result = {"agent": "cassiopeia", "result_data": {"summary": approval_msg}}
                 if not await self.request_user_approval(fake_result, original_task):
-                    await self._send_to_comm_agent(original_task, "사용자에 의해 작업이 취소되었습니다.", False, "orchestra")
+                    await self._send_to_comm_agent(original_task, "사용자에 의해 작업이 취소되었습니다.", False, "cassiopeia")
                     return
 
             await self._send_progress_to_comm(original_task, int((step.step-1)/total_steps*100), f"[{step.step}/{total_steps}] {step.selected_agent} 작업 중...")
@@ -362,7 +362,7 @@ class OrchestraManager:
         summary = final_res.get("summary", "모든 단계가 완료되었습니다.")
         content = final_res.get("content", "")
         full_message = f"{summary}\n\n{content}".strip() if content else summary
-        await self._send_to_comm_agent(original_task, full_message, False, "orchestra")
+        await self._send_to_comm_agent(original_task, full_message, False, "cassiopeia")
 
     async def wait_for_result(self, task_id: str, timeout: int = 600) -> dict[str, Any]:
         key = f"{_RESULTS_KEY_PREFIX}{task_id}"
@@ -405,7 +405,7 @@ class OrchestraManager:
         cancel_result: AgentResult = {
             "task_id": task_id,
             "status": "FAILED",
-            "agent": "orchestra",
+            "agent": "cassiopeia",
             "result_data": {},
             "error": {
                 "code": "CANCELLED_BY_USER",
@@ -419,7 +419,7 @@ class OrchestraManager:
         # 3. 진행 로그 기록
         session_id = state.get("session_id")
         await self._state.add_agent_log(
-            "orchestra", "cancel_task", "사용자가 태스크를 취소했습니다.", task_id, session_id
+            "cassiopeia", "cancel_task", "사용자가 태스크를 취소했습니다.", task_id, session_id
         )
         return True
 
@@ -432,15 +432,15 @@ class OrchestraManager:
         }
         try:
             await self._redis.rpush(_DLQ_KEY, json.dumps(entry, ensure_ascii=False))
-            logger.warning("[OrchestraManager] DLQ 저장: task_id=%s reason=%s", task_id, reason)
+            logger.warning("[CassiopeiaManager] DLQ 저장: task_id=%s reason=%s", task_id, reason)
         except Exception as exc:
-            logger.error("[OrchestraManager] DLQ 저장 실패: %s", exc)
+            logger.error("[CassiopeiaManager] DLQ 저장 실패: %s", exc)
 
     async def receive_agent_result(self, result: AgentResult) -> None:
         task_id = result["task_id"]
         await self._redis.rpush(f"{_RESULTS_KEY_PREFIX}{task_id}", json.dumps(result, ensure_ascii=False))
 
-    async def _handle_agent_result(self, result: dict[str, Any], task: OrchestraTask, requires_approval: bool) -> None:
+    async def _handle_agent_result(self, result: dict[str, Any], task: CassiopeiaTask, requires_approval: bool) -> None:
         if result.get("status") == "FAILED":
             await self._send_error_to_user(task, result.get("error", {}).get("message", "오류"), result.get("agent"))
             return
@@ -454,12 +454,12 @@ class OrchestraManager:
             if not await self.request_user_approval(result, task): return
         await self._send_to_comm_agent(task, full_message, False, result.get("agent", "agent"))
 
-    def _get_comm_queue(self, task: OrchestraTask) -> str:
+    def _get_comm_queue(self, task: CassiopeiaTask) -> str:
         """태스크의 source 필드를 기반으로 플랫폼별 통신 큐 키를 반환합니다."""
         source = task.get("source", "slack")
         return _PLATFORM_COMM_QUEUE.get(source, _DEFAULT_COMM_QUEUE)
 
-    async def request_user_approval(self, result: dict[str, Any], task: OrchestraTask) -> bool:
+    async def request_user_approval(self, result: dict[str, Any], task: CassiopeiaTask) -> bool:
         approval_id = str(uuid.uuid4())
         msg: CommAgentMessage = {
             "task_id": approval_id,
@@ -526,7 +526,7 @@ class OrchestraManager:
                 "usage_stats": {},
             }
         except Exception as exc:
-            logger.error("[OrchestraManager] 샌드박스 실행 실패: task_id=%s %s", task_id, exc)
+            logger.error("[CassiopeiaManager] 샌드박스 실행 실패: task_id=%s %s", task_id, exc)
             return {
                 "task_id": task_id, "status": "FAILED",
                 "result_data": {},
@@ -541,11 +541,11 @@ class OrchestraManager:
             receiver=agent_name,
         )
 
-    async def _send_to_comm_agent(self, task: OrchestraTask, content: str, requires_approval: bool, agent_name: str) -> None:
+    async def _send_to_comm_agent(self, task: CassiopeiaTask, content: str, requires_approval: bool, agent_name: str) -> None:
         req = task.get("requester", {})
         session_id = req.get("thread_ts") or task.get("session_id")
         if session_id:
-            await self._state.add_message(session_id, req.get("user_id", "unknown"), "assistant", content, provider="orchestra")
+            await self._state.add_message(session_id, req.get("user_id", "unknown"), "assistant", content, provider="cassiopeia")
 
         msg: CommAgentMessage = {
             "task_id": task.get("task_id", str(uuid.uuid4())),
@@ -560,12 +560,12 @@ class OrchestraManager:
             receiver="communication",
         )
 
-    async def _send_progress_to_comm(self, task: OrchestraTask, percent: int, message: str) -> None:
+    async def _send_progress_to_comm(self, task: CassiopeiaTask, percent: int, message: str) -> None:
         msg: CommAgentMessage = {
             "task_id": task.get("task_id", str(uuid.uuid4())),
             "content": message,
             "requires_user_approval": False,
-            "agent_name": "orchestra",
+            "agent_name": "cassiopeia",
             "progress_percent": percent,
         }
         source = task.get("source", "slack")
@@ -575,9 +575,9 @@ class OrchestraManager:
             receiver="communication",
         )
 
-    async def _send_error_to_user(self, task: OrchestraTask, error_message: str, agent_name: str = "orchestra") -> None:
+    async def _send_error_to_user(self, task: CassiopeiaTask, error_message: str, agent_name: str = "cassiopeia") -> None:
         content = f"[{agent_name}] 오류: {error_message}"
         await self._send_to_comm_agent(task, content, False, agent_name)
 
-    async def _send_agent_unavailable_error(self, task: OrchestraTask, agent_name: str, reason: str) -> None:
+    async def _send_agent_unavailable_error(self, task: CassiopeiaTask, agent_name: str, reason: str) -> None:
         await self._send_error_to_user(task, f"에이전트 {agent_name} 사용 불가 ({reason})")

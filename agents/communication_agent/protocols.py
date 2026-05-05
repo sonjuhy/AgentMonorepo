@@ -65,22 +65,22 @@ class SlackAgentProtocol(Protocol):
 class SlackCommAgentProtocol(Protocol):
     """
     소통 에이전트(Communication Agent)의 양방향 게이트웨이 인터페이스입니다.
-    - Inbound:  Slack → on_user_request → Redis agent:orchestra:tasks
+    - Inbound:  Slack → on_user_request → Redis agent:cassiopeia:tasks
     - Outbound: Redis agent:communication:tasks → listen_system_results → Slack
-    - Feedback: 사용자 버튼 클릭 → build_approval_blocks → Redis orchestra:results
+    - Feedback: 사용자 버튼 클릭 → build_approval_blocks → Redis cassiopeia:results
     """
 
     agent_name: str
 
     async def on_user_request(self, event: SlackEvent, say: Any) -> None:
         """
-        Slack 이벤트를 수신하여 메시지를 정제하고 오케스트라 Redis 큐로 전달합니다.
+        Slack 이벤트를 수신하여 메시지를 정제하고 카시오페아 Redis 큐로 전달합니다.
 
         처리 흐름:
             1. 권한 확인 (허용된 채널/사용자 검증)
             2. MessageCleaner로 @bot 멘션 등 불필요한 태그 제거
             3. 세션 기반 Slack 스레드 생성 또는 조회
-            4. Redis agent:orchestra:tasks 큐에 OrchestraTask 삽입
+            4. Redis agent:cassiopeia:tasks 큐에 CassiopeiaTask 삽입
             5. 사용자에게 접수 확인 메시지 전송
 
         Args:
@@ -95,7 +95,7 @@ class SlackCommAgentProtocol(Protocol):
         Slack Block Kit으로 렌더링하여 사용자에게 전달합니다.
 
         처리 흐름:
-            1. BLPOP으로 큐에서 OrchestraResult 수신
+            1. BLPOP으로 큐에서 CassiopeiaResult 수신
             2. requires_user_approval에 따라 승인 UI 또는 표준 결과 블록 생성
             3. 세션 스레드에 메시지 전송 (chat_update 또는 chat_postMessage)
 
@@ -122,15 +122,15 @@ class SlackCommAgentProtocol(Protocol):
 class DiscordCommAgentProtocol(Protocol):
     """
     Discord 소통 에이전트의 양방향 게이트웨이 인터페이스입니다.
-    - Inbound:  Discord 메시지 → on_user_message → Redis agent:orchestra:tasks
+    - Inbound:  Discord 메시지 → on_user_message → Redis agent:cassiopeia:tasks
     - Outbound: Redis agent:communication:discord:tasks → listen_system_results → Discord
-    - Feedback: 사용자 버튼 클릭 → Redis orchestra:approval:{task_id}
+    - Feedback: 사용자 버튼 클릭 → Redis cassiopeia:approval:{task_id}
     """
 
     agent_name: str
 
     async def on_user_message(self, event: DiscordEvent) -> None:
-        """Discord 메시지를 수신하여 오케스트라 Redis 큐로 전달합니다."""
+        """Discord 메시지를 수신하여 카시오페아 Redis 큐로 전달합니다."""
         ...
 
     async def listen_system_results(self) -> None:
@@ -145,15 +145,15 @@ class DiscordCommAgentProtocol(Protocol):
 class TelegramCommAgentProtocol(Protocol):
     """
     Telegram 소통 에이전트의 양방향 게이트웨이 인터페이스입니다.
-    - Inbound:  Telegram 메시지 → on_user_message → Redis agent:orchestra:tasks
+    - Inbound:  Telegram 메시지 → on_user_message → Redis agent:cassiopeia:tasks
     - Outbound: Redis agent:communication:telegram:tasks → listen_system_results → Telegram
-    - Feedback: 사용자 인라인 버튼 클릭 → Redis orchestra:approval:{task_id}
+    - Feedback: 사용자 인라인 버튼 클릭 → Redis cassiopeia:approval:{task_id}
     """
 
     agent_name: str
 
     async def on_user_message(self, event: TelegramEvent) -> None:
-        """Telegram 메시지를 수신하여 오케스트라 Redis 큐로 전달합니다."""
+        """Telegram 메시지를 수신하여 카시오페아 Redis 큐로 전달합니다."""
         ...
 
     async def listen_system_results(self) -> None:

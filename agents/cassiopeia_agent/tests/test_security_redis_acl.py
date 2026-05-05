@@ -28,8 +28,8 @@ def test_redis_acl_restriction():
         "에이전트별로 전용 계정을 생성하거나, 접근 범위를 더 제한해야 합니다."
     )
 
-def test_orchestra_is_only_full_access():
-    """orchestra 계정만 전체 접근(*) 권한을 가져야 함을 검증합니다."""
+def test_cassiopeia_is_only_full_access():
+    """cassiopeia 계정만 전체 접근(*) 권한을 가져야 함을 검증합니다."""
     acl_path = Path("redis/acl.conf")
     if not acl_path.exists():
         acl_path = Path("redis/acl.conf.tpl")
@@ -46,4 +46,4 @@ def test_orchestra_is_only_full_access():
             if user_match:
                 full_access_users.append(user_match.group(1))
     
-    assert full_access_users == ["orchestra"], f"orchestra 외에 전체 권한을 가진 유저가 있습니다: {full_access_users}"
+    assert full_access_users == ["cassiopeia"], f"cassiopeia 외에 전체 권한을 가진 유저가 있습니다: {full_access_users}"

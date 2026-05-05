@@ -22,7 +22,7 @@ async def _push_dlq(fake_redis, count: int = 3) -> list[dict]:
             "error": {"code": "TIMEOUT", "message": "시간 초과"},
             "ts": "2025-01-01T00:00:00+00:00",
         }
-        await fake_redis.rpush("orchestra:dlq", json.dumps(entry, ensure_ascii=False))
+        await fake_redis.rpush("cassiopeia:dlq", json.dumps(entry, ensure_ascii=False))
         entries.append(entry)
     return entries
 
@@ -77,7 +77,7 @@ class TestDLQReplay:
         data = resp.json()
         assert data["replayed"] == 1
 
-    async def test_replay_publishes_to_orchestra_channel(self, async_client, fake_redis):
+    async def test_replay_publishes_to_cassiopeia_channel(self, async_client, fake_redis):
         from unittest.mock import AsyncMock
         entries = await _push_dlq(fake_redis, count=1)
         task_id = entries[0]["task_id"]
@@ -92,7 +92,7 @@ class TestDLQReplay:
         await async_client.post("/admin/dlq/replay", json={"task_id": task_id})
 
         assert len(published) == 1
-        assert published[0][0] == "agent:orchestra"
+        assert published[0][0] == "agent:cassiopeia"
 
     async def test_replay_nonexistent_task_returns_404(self, async_client):
         resp = await async_client.post("/admin/dlq/replay", json={

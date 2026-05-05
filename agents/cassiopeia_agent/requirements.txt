@@ -1,4 +1,4 @@
-# Orchestra Agent Dependencies
+# Cassiopeia Agent Dependencies
 
 # FastAPI & ASGI
 fastapi>=0.115.0

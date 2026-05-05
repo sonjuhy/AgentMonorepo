@@ -1,7 +1,7 @@
 # Skill: python-strict-typing
 
 ## Description
-이 스킬은 `Notion-Agent-Orchestrator` 모노리포 내에서 에이전트가 파이썬 코드를 생성, 수정, 또는 리뷰할 때 준수해야 할 엄격한 Python 3.12+ 코딩 규격과 스켈레톤(프레임) 아키텍처 원칙을 정의합니다.
+이 스킬은 `Notion-Agent-Cassiopeia` 모노리포 내에서 에이전트가 파이썬 코드를 생성, 수정, 또는 리뷰할 때 준수해야 할 엄격한 Python 3.12+ 코딩 규격과 스켈레톤(프레임) 아키텍처 원칙을 정의합니다.
 
 ## Principles (원리 및 근거)
 1. **메모리 최적화 및 환각(Hallucination) 방지**: 실제 비즈니스 로직 구현을 배제하고 추상 인터페이스만 선언함으로써, 불필요한 코드 생성을 막아 토큰 낭비를 줄이고 대상 환경(128MB RAM 제한의 단발성 Docker)에 적합한 가벼운 코드를 유도합니다.

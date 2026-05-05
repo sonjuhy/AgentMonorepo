@@ -1,8 +1,8 @@
 """
 ScheduledTaskRunner — Redis Sorted Set 기반 태스크 스케줄러
 
-- orchestra:scheduled_tasks (Sorted Set): score = 실행 예정 Unix timestamp
-- 주기적으로 due 태스크를 꺼내 cassiopeia Pub/Sub으로 orchestra에 publish
+- cassiopeia:scheduled_tasks (Sorted Set): score = 실행 예정 Unix timestamp
+- 주기적으로 due 태스크를 꺼내 cassiopeia Pub/Sub으로 cassiopeia에 publish
 - repeat_interval_secs > 0 이면 완료 후 다음 실행 시각으로 재등록
 - 환경변수 SCHEDULE_POLL_INTERVAL(초)로 폴링 간격 조정 (기본 10초)
 """
@@ -23,8 +23,8 @@ from cassiopeia_sdk.client import AgentMessage
 
 logger = logging.getLogger("cassiopeia_agent.scheduler")
 
-_SCHEDULED_TASKS_KEY = "orchestra:scheduled_tasks"
-_ORCHESTRA_CHANNEL = "agent:orchestra"
+_SCHEDULED_TASKS_KEY = "cassiopeia:scheduled_tasks"
+_CASSIOPEIA_CHANNEL = "agent:cassiopeia"
 _POLL_INTERVAL: int = int(os.environ.get("SCHEDULE_POLL_INTERVAL", "10"))
 
 
@@ -48,14 +48,14 @@ class ScheduledTaskRunner:
     def __init__(
         self,
         redis_client: aioredis.Redis | None = None,
-        orchestra_channel: str = _ORCHESTRA_CHANNEL,
+        cassiopeia_channel: str = _CASSIOPEIA_CHANNEL,
     ) -> None:
         if redis_client is not None:
             self._redis = redis_client
         else:
             redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
             self._redis = aioredis.from_url(redis_url, decode_responses=True, socket_timeout=5.0)
-        self._channel = orchestra_channel
+        self._channel = cassiopeia_channel
 
     async def schedule(
         self,
@@ -67,7 +67,7 @@ class ScheduledTaskRunner:
         태스크를 특정 시각에 실행되도록 등록합니다.
 
         Args:
-            task: OrchestraTask 형식의 dict (task_id 없으면 자동 생성)
+            task: CassiopeiaTask 형식의 dict (task_id 없으면 자동 생성)
             run_at: 실행할 Unix timestamp (time.time() 기준)
             repeat_interval_secs: 0이면 1회 실행, 양수면 해당 초마다 반복
 
@@ -122,7 +122,7 @@ class ScheduledTaskRunner:
         return result
 
     async def run_loop(self) -> None:
-        """due 태스크를 폴링하여 오케스트라 큐에 push하는 메인 루프."""
+        """due 태스크를 폴링하여 카시오페아 큐에 push하는 메인 루프."""
         logger.info("[Scheduler] 루프 시작 (poll=%ds)", _POLL_INTERVAL)
         while True:
             try:
@@ -158,7 +158,7 @@ class ScheduledTaskRunner:
         task_to_push = {**task, "task_id": str(uuid.uuid4())}
         msg = AgentMessage(
             sender="scheduler",
-            receiver="orchestra",
+            receiver="cassiopeia",
             action="scheduled_task",
             payload=task_to_push,
         )

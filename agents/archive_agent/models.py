@@ -29,11 +29,11 @@ class ParsedTask(TypedDict):
     task_type: str
 
 
-# ── OrchestraManager DispatchMessage 연동 스키마 ───────────────────────────────
+# ── CassiopeiaManager DispatchMessage 연동 스키마 ───────────────────────────────
 
 class ArchiveTaskParams(TypedDict):
     """
-    OrchestraManager가 DispatchMessage.params로 전달하는 archive_agent 전용 스키마.
+    CassiopeiaManager가 DispatchMessage.params로 전달하는 archive_agent 전용 스키마.
     """
     source: ArchiveSource        # "notion" | "obsidian" | "direct"
     action: ArchiveAction        # "get_page" | "query_database" | "search" | "read_file"

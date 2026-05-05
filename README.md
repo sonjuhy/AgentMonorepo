@@ -223,9 +223,9 @@ The project is structured as a monorepo, with different agents and shared librar
 
 ## Running the Agents
 
-### Orchestra Agent (`agents/cassiopeia_agent/`)
+### Cassiopeia Agent (`agents/cassiopeia_agent/`)
 
-The orchestra agent serves as the core of the system.
+The cassiopeia agent serves as the core of the system.
 
 **Development Mode (local LLM):**
 ```bash
@@ -286,7 +286,7 @@ This project is licensed under the Apache 2.0 License.
 *   Updated the FastAPI app title and descriptions in `agents/cassiopeia_agent/main.py`.
 *   Updated `agents/cassiopeia_agent/OVERVIEW.md` to reflect the new agent name and path.
 *   Updated example commands in `agents/cassiopeia_agent/Dockerfile` and `agents/cassiopeia_agent/Dockerfile.alpine` to use the new module path.
-*   Updated the `state_manager.py` role check for "orchestra" to "cassiopeia".
+*   Updated the `state_manager.py` role check for "cassiopeia" to "cassiopeia".
 *   Updated `GUIDE.md` with new agent name, paths, and updated commands.
 
 ## **Next Steps**

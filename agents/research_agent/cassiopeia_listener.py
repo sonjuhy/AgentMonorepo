@@ -1,8 +1,8 @@
 """
 Research Agent Cassiopeia 리스너
-- cassiopeia-sdk CassiopeiaClient.listen()으로 orchestra 디스패치 수신 (Redis Pub/Sub)
-- ResearchAgent._handle_task()에 위임 후 orchestra /results로 결과 보고
-- agent:research-agent:health Redis Hash를 15초 주기로 갱신 (OrchestraManager HealthMonitor 연동)
+- cassiopeia-sdk CassiopeiaClient.listen()으로 cassiopeia 디스패치 수신 (Redis Pub/Sub)
+- ResearchAgent._handle_task()에 위임 후 cassiopeia /results로 결과 보고
+- agent:research-agent:health Redis Hash를 15초 주기로 갱신 (CassiopeiaManager HealthMonitor 연동)
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ _HEALTH_TTL: int = _HEARTBEAT_INTERVAL * 4
 
 class ResearchCassiopeiaListener:
     """
-    OrchestraManager ↔ ResearchAgent 연결 브리지 (Pub/Sub 기반).
+    CassiopeiaManager ↔ ResearchAgent 연결 브리지 (Pub/Sub 기반).
 
     - cassiopeia-sdk listen()으로 agent:research-agent 채널 구독
     - ResearchAgent._handle_task()에 위임
-    - HTTP POST {orchestra_url}/results 결과 보고 (agent 내부에서 처리)
+    - HTTP POST {cassiopeia_url}/results 결과 보고 (agent 내부에서 처리)
     - 15초 주기 heartbeat (agent:research-agent:health)
     """
 
@@ -40,14 +40,14 @@ class ResearchCassiopeiaListener:
         self,
         agent: ResearchAgent | None = None,
         redis_url: str | None = None,
-        orchestra_url: str | None = None,
+        cassiopeia_url: str | None = None,
     ) -> None:
         self._agent = agent or ResearchAgent()
 
         _url = redis_url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
         self._redis_url = _url.replace("localhost", "127.0.0.1")
-        self._orchestra_url = orchestra_url or os.environ.get(
-            "ORCHESTRA_URL", "http://127.0.0.1:8001"
+        self._cassiopeia_url = cassiopeia_url or os.environ.get(
+            "CASSIOPEIA_URL", "http://127.0.0.1:8001"
         )
         self._redis: aioredis.Redis | None = None
         self._cassiopeia: CassiopeiaClient | None = None
@@ -102,7 +102,7 @@ class ResearchCassiopeiaListener:
         """
         수신한 AgentMessage를 ResearchAgent에 위임합니다.
 
-        msg.payload는 orchestra가 전송한 dispatch dict입니다.
+        msg.payload는 cassiopeia가 전송한 dispatch dict입니다.
         ResearchAgent._handle_task()는 JSON 문자열을 기대하므로 직렬화 후 전달합니다.
         """
         task_id = msg.payload.get("task_id", "unknown") if isinstance(msg.payload, dict) else "unknown"
@@ -112,7 +112,7 @@ class ResearchCassiopeiaListener:
         try:
             logger.info("[ResearchCassiopeiaListener] 태스크 수신: task_id=%s action=%s", task_id, msg.action)
             raw = json.dumps(msg.payload, ensure_ascii=False)
-            await self._agent._handle_task(raw, self._orchestra_url)
+            await self._agent._handle_task(raw, self._cassiopeia_url)
         except asyncio.CancelledError:
             logger.warning("[ResearchCassiopeiaListener] 태스크 취소됨: task_id=%s", task_id)
             raise
@@ -126,7 +126,7 @@ class ResearchCassiopeiaListener:
     async def _heartbeat_loop(self) -> None:
         """
         15초 주기로 agent:research-agent:health Redis Hash를 갱신합니다.
-        OrchestraManager HealthMonitor가 이 키를 읽어 가용 여부를 판단합니다.
+        CassiopeiaManager HealthMonitor가 이 키를 읽어 가용 여부를 판단합니다.
         CancelledError를 수신하면 정상 종료합니다.
         """
         logger.info("[ResearchCassiopeiaListener] heartbeat 시작")

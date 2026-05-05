@@ -79,7 +79,7 @@ async def test_on_user_message_success(discord_agent, mock_cassiopeia, mock_redi
     mock_cassiopeia.send_message.assert_awaited_once()
     call_kwargs = mock_cassiopeia.send_message.call_args.kwargs
     assert call_kwargs["action"] == "user_request"
-    assert call_kwargs["receiver"] == "orchestra"
+    assert call_kwargs["receiver"] == "cassiopeia"
     assert call_kwargs["payload"]["content"] == "hello"
     assert call_kwargs["payload"]["source"] == "discord"
     mock_redis.save_task_context.assert_awaited_once()

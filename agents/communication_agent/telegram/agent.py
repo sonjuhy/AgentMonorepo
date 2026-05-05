@@ -1,9 +1,9 @@
 """
 Telegram 소통 에이전트 (TelegramCommAgent)
 - Telegram Bot API와 cassiopeia Pub/Sub 사이의 양방향 게이트웨이
-- Inbound:  Telegram 메시지 → on_user_message → cassiopeia Pub/Sub agent:orchestra
+- Inbound:  Telegram 메시지 → on_user_message → cassiopeia Pub/Sub agent:cassiopeia
 - Outbound: cassiopeia Pub/Sub agent:telegram_communication_agent → listen_system_results → Telegram
-- Feedback: [승인/수정 요청/취소] 인라인 버튼 클릭 → Redis orchestra:approval:{task_id}
+- Feedback: [승인/수정 요청/취소] 인라인 버튼 클릭 → Redis cassiopeia:approval:{task_id}
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ class TelegramCommAgent:
 
     async def on_user_message(self, event: TelegramEvent, message: Message) -> None:
         """
-        Telegram 메시지를 수신하여 오케스트라 Redis 큐로 전달합니다.
+        Telegram 메시지를 수신하여 카시오페아 Redis 큐로 전달합니다.
 
         Args:
             event (TelegramEvent): 파싱된 Telegram 이벤트.
@@ -140,7 +140,7 @@ class TelegramCommAgent:
         await cassiopeia.send_message(
             action="user_request",
             payload=sign_task(task),
-            receiver="orchestra",
+            receiver="cassiopeia",
         )
 
         await self._redis.save_task_context(task_id, {
@@ -152,7 +152,7 @@ class TelegramCommAgent:
         })
 
         logger.info(
-            "[TelegramAgent] 오케스트라 전달 — task_id=%s user=%s message_id=%s",
+            "[TelegramAgent] 카시오페아 전달 — task_id=%s user=%s message_id=%s",
             task_id, user_id, message_id,
         )
 
@@ -164,7 +164,7 @@ class TelegramCommAgent:
         chat_id: str,
     ) -> None:
         """
-        인라인 버튼 클릭(CallbackQuery)을 처리하여 오케스트라에 피드백을 전달합니다.
+        인라인 버튼 클릭(CallbackQuery)을 처리하여 카시오페아에 피드백을 전달합니다.
 
         Args:
             action (str): "approve" | "request_revision" | "cancel"

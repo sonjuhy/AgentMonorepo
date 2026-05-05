@@ -62,14 +62,14 @@ class TestSandboxDisabled:
 
 
 class TestManagerWithDisabledSandbox:
-    """OrchestraManager 가 sandbox=None 상태에서 sandbox 요청을 안전하게 거부한다."""
+    """CassiopeiaManager 가 sandbox=None 상태에서 sandbox 요청을 안전하게 거부한다."""
 
     @pytest.mark.asyncio
     async def test_run_sandbox_task_returns_failed_when_no_tool(
         self, fake_redis, nlu_engine, state_manager, health_monitor
     ):
-        from agents.cassiopeia_agent.manager import OrchestraManager
-        manager = OrchestraManager(
+        from agents.cassiopeia_agent.manager import CassiopeiaManager
+        manager = CassiopeiaManager(
             redis_client=fake_redis,
             nlu_engine=nlu_engine,
             state_manager=state_manager,

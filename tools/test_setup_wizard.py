@@ -22,7 +22,7 @@ def test_setup_wizard_generates_env():
             "",             # CLIENT_API_KEY (will auto-generate)
             "",             # DISPATCH_HMAC_SECRET (will auto-generate)
             "",             # ENCRYPTION_KEY (will auto-generate)
-            "",             # REDIS_ORCHESTRA_PASSWORD (will auto-generate)
+            "",             # REDIS_CASSIOPEIA_PASSWORD (will auto-generate)
             "",             # REDIS_COMMUNITY_PASSWORD (will auto-generate)
         ]
         
@@ -58,8 +58,8 @@ def test_setup_wizard_generates_env():
         assert "ENCRYPTION_KEY" in env_dict
         assert len(env_dict["ENCRYPTION_KEY"]) >= 32
         
-        assert "REDIS_ORCHESTRA_PASSWORD" in env_dict
-        assert len(env_dict["REDIS_ORCHESTRA_PASSWORD"]) >= 16
+        assert "REDIS_CASSIOPEIA_PASSWORD" in env_dict
+        assert len(env_dict["REDIS_CASSIOPEIA_PASSWORD"]) >= 16
 
 def test_setup_wizard_claude_backend():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -74,7 +74,7 @@ def test_setup_wizard_claude_backend():
             "",             # CLIENT_API_KEY 
             "",             # DISPATCH_HMAC_SECRET 
             "",             # ENCRYPTION_KEY 
-            "",             # REDIS_ORCHESTRA_PASSWORD 
+            "",             # REDIS_CASSIOPEIA_PASSWORD 
             "",             # REDIS_COMMUNITY_PASSWORD 
         ]
         
@@ -105,7 +105,7 @@ def test_setup_wizard_slack_notion():
             "",             # CLIENT_API_KEY
             "",             # DISPATCH_HMAC_SECRET
             "",             # ENCRYPTION_KEY
-            "",             # REDIS_ORCHESTRA_PASSWORD
+            "",             # REDIS_CASSIOPEIA_PASSWORD
             "",             # REDIS_COMMUNITY_PASSWORD
         ]
         

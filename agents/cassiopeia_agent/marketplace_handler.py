@@ -32,7 +32,6 @@ _MAX_CODE_BYTES = 512 * 1024  # 512 KB
 _MAX_PACKAGES = 20
 _VALID_PERMISSION_PRESETS = frozenset({"minimal", "standard", "trusted"})
 
-
 def _validate_manifest(manifest: dict[str, Any]) -> None:
     """마켓플레이스 매니페스트 입력값을 서버사이드에서 검증한다.
 

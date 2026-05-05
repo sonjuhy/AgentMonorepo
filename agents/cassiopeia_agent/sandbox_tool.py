@@ -1,5 +1,5 @@
 """
-SandboxTool — 오케스트라 샌드박스 클라이언트 도구
+SandboxTool — 카시오페아 샌드박스 클라이언트 도구
 
 운영 모드:
 1. remote (기본): 상시 가동 중인 sandbox_agent (HTTP) 호출.

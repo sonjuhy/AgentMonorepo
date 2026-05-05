@@ -1,12 +1,12 @@
 """
-SandboxTool 단위 테스트 및 OrchestraManager 통합 테스트
+SandboxTool 단위 테스트 및 CassiopeiaManager 통합 테스트
 
 [SandboxTool]
 - execute_code(): 성공 / 필수 파라미터 누락 / VM 실행 오류 / release 보장
 - start() / shutdown(): VMPool 위임 확인
 - pool_stats(): VMPool.stats() 위임 확인
 
-[OrchestraManager + SandboxTool]
+[CassiopeiaManager + SandboxTool]
 - _execute_agent_task(): sandbox_agent → 직접 실행, 일반 에이전트 → Redis 경유
 - _run_sandbox_task(): 성공 / INVALID_PARAMS / EXECUTION_ERROR 반환 포맷
 - _is_internal_tool(): sandbox_tool 존재 여부에 따른 판별
@@ -122,7 +122,7 @@ class TestSandboxToolLifecycle:
         assert sandbox_tool.runtime == "remote"
 
 
-# ── OrchestraManager + SandboxTool 통합 픽스처 ───────────────────────────────
+# ── CassiopeiaManager + SandboxTool 통합 픽스처 ───────────────────────────────
 
 @pytest.fixture
 def sandbox_tool_mock():
@@ -139,8 +139,8 @@ def sandbox_tool_mock():
 
 @pytest_asyncio.fixture
 async def manager_with_sandbox(fake_redis, nlu_engine, state_manager, health_monitor, sandbox_tool_mock, mock_cassiopeia):
-    from agents.cassiopeia_agent.manager import OrchestraManager
-    return OrchestraManager(
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
+    return CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=state_manager,
@@ -152,8 +152,8 @@ async def manager_with_sandbox(fake_redis, nlu_engine, state_manager, health_mon
 
 @pytest_asyncio.fixture
 async def manager_no_sandbox(fake_redis, nlu_engine, state_manager, health_monitor, mock_cassiopeia):
-    from agents.cassiopeia_agent.manager import OrchestraManager
-    return OrchestraManager(
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
+    return CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=state_manager,
@@ -257,7 +257,7 @@ class TestExecuteAgentTask:
         dispatch = {**_SANDBOX_DISPATCH, "agent": "file_agent", "action": "read_file"}
         # 결과를 미리 Redis에 push해 두어야 wait_for_result가 반환함
         await fake_redis.rpush(
-            "orchestra:results:task-redis",
+            "cassiopeia:results:task-redis",
             json.dumps({"task_id": "task-redis", "status": "COMPLETED", "result_data": {}, "error": None}),
         )
 
@@ -274,7 +274,7 @@ class TestExecuteAgentTask:
     async def test_sandbox_without_tool_uses_cassiopeia(self, manager_no_sandbox, mock_cassiopeia, fake_redis):
         dispatch = {**_SANDBOX_DISPATCH, "action": "execute_code"}
         await fake_redis.rpush(
-            "orchestra:results:task-no-tool",
+            "cassiopeia:results:task-no-tool",
             json.dumps({"task_id": "task-no-tool", "status": "COMPLETED", "result_data": {}, "error": None}),
         )
 

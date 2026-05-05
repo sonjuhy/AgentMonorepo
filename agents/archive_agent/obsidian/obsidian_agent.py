@@ -52,7 +52,7 @@ class ObsidianArchiveAgent:
         dispatch_msg: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        OrchestraManager의 DispatchMessage를 처리합니다.
+        CassiopeiaManager의 DispatchMessage를 처리합니다.
         """
         task_id: str = dispatch_msg.get("task_id", "unknown")
         params: ArchiveTaskParams = dispatch_msg.get("params") or {}

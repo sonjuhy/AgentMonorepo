@@ -1,6 +1,6 @@
 """
 Research Agent 진입점
-- cassiopeia-sdk Pub/Sub으로 orchestra 디스패치 수신
+- cassiopeia-sdk Pub/Sub으로 cassiopeia 디스패치 수신
 """
 
 import asyncio

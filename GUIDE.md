@@ -6,7 +6,7 @@ This project implements a multi-agent system where agents collaborate to perform
 
 The project consists of several agents, each with a specific role:
 
-*   **Orchestra Agent (`agents/cassiopeia_agent/`):** The central orchestrator that manages task distribution, planning, and communication between other agents. It acts as the main entry point for user requests.
+*   **Cassiopeia Agent (`agents/cassiopeia_agent/`):** The central cassiopeiator that manages task distribution, planning, and communication between other agents. It acts as the main entry point for user requests.
 *   **Research Agent (`agents/research_agent/`):** Responsible for conducting research and gathering information.
 *   **File Agent (`agents/file_agent/`):** Handles file operations, such as reading, writing, and managing files.
 *   **Communication Agent (`agents/communication_agent/`):** Manages communication with external platforms like Slack, Discord, and Telegram.
@@ -19,9 +19,9 @@ The project consists of several agents, each with a specific role:
 
 ## Running the Agents
 
-### Orchestra Agent
+### Cassiopeia Agent
 
-The orchestra agent can be run as a FastAPI application.
+The cassiopeia agent can be run as a FastAPI application.
 
 **Development Mode (local LLM):**
 ```bash
@@ -59,7 +59,7 @@ python tools/setup_wizard.py
 
 1.  **Code Structure:** Agents are located in the `agents/` directory, with core libraries in `shared_core/`.
 2.  **Dependency Management:** Poetry is used for dependency management. Run `poetry install` within the respective agent's directory or at the project root if a poetry.lock exists.
-3.  **Testing:** Tests are located in the `tests/` subdirectory of each agent. Use `pytest` to run tests. For example, to run tests for the orchestra agent:
+3.  **Testing:** Tests are located in the `tests/` subdirectory of each agent. Use `pytest` to run tests. For example, to run tests for the cassiopeia agent:
     ```bash
     pytest agents/cassiopeia_agent/tests/
     ```
@@ -91,7 +91,7 @@ If you encounter issues, check the agent logs, ensure dependencies are installed
 *   Updated the FastAPI app title and descriptions in `agents/cassiopeia_agent/main.py`.
 *   Updated `agents/cassiopeia_agent/OVERVIEW.md` to reflect the new agent name and path.
 *   Updated example commands in `agents/cassiopeia_agent/Dockerfile` and `agents/cassiopeia_agent/Dockerfile.alpine` to use the new module path.
-*   Updated the `state_manager.py` role check for "orchestra" to "cassiopeia".
+*   Updated the `state_manager.py` role check for "cassiopeia" to "cassiopeia".
 *   Updated `README.md` with the new agent name.
 
 ## **Next Steps**

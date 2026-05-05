@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     import redis.asyncio as aioredis
     from cassiopeia_sdk.client import CassiopeiaClient
     from .health_monitor import HealthMonitor
-    from .manager import OrchestraManager
+    from .manager import CassiopeiaManager
     from .state_manager import StateManager
     from .agent_builder_handler import AgentBuilderHandler
     from .registry import AgentRegistry
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 class _AppContext:
-    manager: OrchestraManager
+    manager: CassiopeiaManager
     state_manager: StateManager
     health_monitor: HealthMonitor
     builder_handler: AgentBuilderHandler

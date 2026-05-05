@@ -18,7 +18,7 @@ from shared_core.messaging import AgentMessage, AgentName
 
 _FALLBACK_RECEIVER: AgentName = "planning"
 
-_SYSTEM_PROMPT_TEMPLATE = """당신은 사용자의 자연어 요청을 분석하여 처리할 에이전트와 작업을 결정하는 오케스트라 라우터입니다.
+_SYSTEM_PROMPT_TEMPLATE = """당신은 사용자의 자연어 요청을 분석하여 처리할 에이전트와 작업을 결정하는 카시오페아 라우터입니다.
 
 사용 가능한 에이전트 목록:
 {agents_description}
@@ -137,7 +137,7 @@ class LLMIntentAnalyzer:
             system_instruction=system_prompt,
             options=LLMGenerateOptions(max_tokens=1024),
         )
-        return _parse_agent_messages(raw, "orchestra", set(capabilities.keys()))
+        return _parse_agent_messages(raw, "cassiopeia", set(capabilities.keys()))
 
 
 # ── 레거시 별칭 ──────────────────────────────────────────────────────────────────
@@ -192,9 +192,9 @@ class ClaudeCLIIntentAnalyzer:
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             print(f"[intent_analyzer] Claude CLI 오류: {stderr.decode()}")
-            return _fallback_messages("orchestra")
+            return _fallback_messages("cassiopeia")
         return _parse_agent_messages(
-            stdout.decode().strip(), "orchestra", set(capabilities.keys())
+            stdout.decode().strip(), "cassiopeia", set(capabilities.keys())
         )
 
 
@@ -229,7 +229,7 @@ class GeminiCLIIntentAnalyzer:
         stdout, stderr = await proc.communicate(input=full_prompt.encode())
         if proc.returncode != 0:
             print(f"[intent_analyzer] Gemini CLI 오류: {stderr.decode()}")
-            return _fallback_messages("orchestra")
+            return _fallback_messages("cassiopeia")
         return _parse_agent_messages(
-            stdout.decode().strip(), "orchestra", set(capabilities.keys())
+            stdout.decode().strip(), "cassiopeia", set(capabilities.keys())
         )

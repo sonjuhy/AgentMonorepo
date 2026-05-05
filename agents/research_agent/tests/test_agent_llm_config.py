@@ -114,7 +114,7 @@ class TestResearchAgentPerCallLLMConfig:
             agent._storage.save_data.return_value = "ref-1"
             agent._report_result = AsyncMock()
 
-            await agent._handle_task(raw, "http://orchestra:8001")
+            await agent._handle_task(raw, "http://cassiopeia:8001")
 
         per_call_cfgs = [c for c in call_log if c.backend == "claude"]
         assert len(per_call_cfgs) >= 1
@@ -141,6 +141,6 @@ class TestResearchAgentPerCallLLMConfig:
         agent._report_result = AsyncMock()
 
         raw = '{"task_id":"t2","action":"investigate","params":{"query":"test"}}'
-        await agent._handle_task(raw, "http://orchestra:8001")
+        await agent._handle_task(raw, "http://cassiopeia:8001")
 
         assert agent._llm_config.backend == "gemini"

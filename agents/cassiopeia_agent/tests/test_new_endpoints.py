@@ -105,7 +105,7 @@ class TestWebhookCallback:
     async def test_webhook_fired_on_result(self, async_client, fake_redis):
         """결과 수신 시 웹훅이 호출되는지 검증"""
         task_id = str(uuid.uuid4())
-        # 콜백 URL을 Redis에 저장 (오케스트라 매니저가 저장하는 방식)
+        # 콜백 URL을 Redis에 저장 (카시오페아 매니저가 저장하는 방식)
         await fake_redis.set(f"task:{task_id}:callback_url", "https://example.com/done")
 
         with patch("httpx.AsyncClient") as mock_client_cls:
@@ -135,7 +135,7 @@ class TestApprovalAPI:
 
     async def test_get_pending_approval(self, async_client, fake_redis):
         approval_id = str(uuid.uuid4())
-        await fake_redis.hset(f"orchestra:approval_meta:{approval_id}", mapping={
+        await fake_redis.hset(f"cassiopeia:approval_meta:{approval_id}", mapping={
             "task_id": "task-123",
             "question": "이 작업을 실행하시겠습니까?",
             "status": "PENDING",
@@ -151,7 +151,7 @@ class TestApprovalAPI:
 
     async def test_respond_approve(self, async_client, fake_redis):
         approval_id = str(uuid.uuid4())
-        await fake_redis.hset(f"orchestra:approval_meta:{approval_id}", mapping={
+        await fake_redis.hset(f"cassiopeia:approval_meta:{approval_id}", mapping={
             "task_id": "task-456",
             "question": "실행할까요?",
             "status": "PENDING",
@@ -167,7 +167,7 @@ class TestApprovalAPI:
 
     async def test_respond_reject(self, async_client, fake_redis):
         approval_id = str(uuid.uuid4())
-        await fake_redis.hset(f"orchestra:approval_meta:{approval_id}", mapping={
+        await fake_redis.hset(f"cassiopeia:approval_meta:{approval_id}", mapping={
             "task_id": "task-789",
             "question": "실행할까요?",
             "status": "PENDING",
@@ -182,7 +182,7 @@ class TestApprovalAPI:
 
     async def test_respond_invalid_action_rejected(self, async_client, fake_redis):
         approval_id = str(uuid.uuid4())
-        await fake_redis.hset(f"orchestra:approval_meta:{approval_id}", mapping={
+        await fake_redis.hset(f"cassiopeia:approval_meta:{approval_id}", mapping={
             "task_id": "t-x", "question": "?", "status": "PENDING",
             "expires_at": "2099-12-31T23:59:59+00:00",
         })
@@ -194,7 +194,7 @@ class TestApprovalAPI:
 
     async def test_respond_already_responded(self, async_client, fake_redis):
         approval_id = str(uuid.uuid4())
-        await fake_redis.hset(f"orchestra:approval_meta:{approval_id}", mapping={
+        await fake_redis.hset(f"cassiopeia:approval_meta:{approval_id}", mapping={
             "task_id": "t-dup", "question": "?", "status": "APPROVED",
             "expires_at": "2099-12-31T23:59:59+00:00",
         })

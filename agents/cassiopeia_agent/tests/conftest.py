@@ -117,7 +117,7 @@ def nlu_engine(mock_llm_provider):
     return NLUEngine(provider=mock_llm_provider)
 
 
-# ── OrchestraManager ─────────────────────────────────────────────────────────
+# ── CassiopeiaManager ─────────────────────────────────────────────────────────
 
 @pytest.fixture
 def mock_cassiopeia():
@@ -132,8 +132,8 @@ def mock_cassiopeia():
 
 @pytest_asyncio.fixture
 async def manager(fake_redis, nlu_engine, state_manager, health_monitor, mock_cassiopeia):
-    from agents.cassiopeia_agent.manager import OrchestraManager
-    return OrchestraManager(
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
+    return CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=state_manager,
@@ -150,7 +150,7 @@ async def async_client(fake_redis, nlu_engine, tmp_path):
     from agents.cassiopeia_agent.main import app
     from agents.cassiopeia_agent import app_context
     from agents.cassiopeia_agent.health_monitor import HealthMonitor
-    from agents.cassiopeia_agent.manager import OrchestraManager
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
     from agents.cassiopeia_agent.state_manager import StateManager
     from agents.cassiopeia_agent.agent_builder_handler import AgentBuilderHandler
     from agents.cassiopeia_agent.registry import AgentRegistry
@@ -168,7 +168,7 @@ async def async_client(fake_redis, nlu_engine, tmp_path):
     sm = StateManager(redis_client=fake_redis)
     sm._db_path = db_path
     hm = HealthMonitor(redis_client=fake_redis)
-    mgr = OrchestraManager(
+    mgr = CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=sm,

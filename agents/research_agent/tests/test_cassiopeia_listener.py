@@ -36,7 +36,7 @@ def listener(mock_agent, mock_redis):
     inst = ResearchCassiopeiaListener(
         agent=mock_agent,
         redis_url="redis://127.0.0.1:6379",
-        orchestra_url="http://orchestra:8001",
+        cassiopeia_url="http://cassiopeia:8001",
     )
     inst._redis = mock_redis
     return inst
@@ -60,7 +60,7 @@ class TestHandleTask:
         mock_agent._handle_task.assert_awaited_once()
         raw_arg, url_arg = mock_agent._handle_task.call_args.args
         assert json.loads(raw_arg) == payload
-        assert url_arg == "http://orchestra:8001"
+        assert url_arg == "http://cassiopeia:8001"
 
     @pytest.mark.asyncio
     async def test_sets_busy_then_idle(self, listener, mock_agent, mock_redis):

@@ -1,9 +1,9 @@
 from typing import Protocol, Any
 from shared_core.messaging import AgentMessage, AgentName
 
-class OrchestraAgentProtocol(Protocol):
+class CassiopeiaAgentProtocol(Protocol):
     """
-    모든 에이전트를 조율하는 Orchestra 에이전트의 인터페이스입니다.
+    모든 에이전트를 조율하는 Cassiopeia 에이전트의 인터페이스입니다.
     """
 
     async def analyze_user_intent(self, user_input: str) -> list[AgentMessage]:

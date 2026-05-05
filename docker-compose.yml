@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     # 에이전트 간 내부 통신용으로만 사용 (호스트 노출 차단)
     environment:
-      - REDIS_ORCHESTRA_PASSWORD=${REDIS_ORCHESTRA_PASSWORD}
+      - REDIS_CASSIOPEIA_PASSWORD=${REDIS_CASSIOPEIA_PASSWORD}
       - REDIS_COMMUNITY_PASSWORD=${REDIS_COMMUNITY_PASSWORD}
     volumes:
       - redis_data:/data
@@ -16,8 +16,8 @@ services:
       - ./redis/entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     healthcheck:
-      # ACL 적용 후 orchestra 계정으로 ping 확인
-      test: ["CMD", "redis-cli", "-u", "redis://orchestra:${REDIS_ORCHESTRA_PASSWORD}@localhost:6379", "ping"]
+      # ACL 적용 후 cassiopeia 계정으로 ping 확인
+      test: ["CMD", "redis-cli", "-u", "redis://cassiopeia:${REDIS_CASSIOPEIA_PASSWORD}@localhost:6379", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -45,22 +45,22 @@ services:
               capabilities: [gpu]
 
   # ─────────────────────────────────────────────
-  # Orchestra Agent: NLU + 에이전트 디스패치 허브
+  # Cassiopeia Agent: NLU + 에이전트 디스패치 허브
   # ─────────────────────────────────────────────
-  orchestra_agent:
+  cassiopeia_agent:
     build:
       context: .
-      dockerfile: agents/orchestra_agent/Dockerfile
-    image: agentmonorepo-orchestra_agent
+      dockerfile: agents/cassiopeia_agent/Dockerfile
+    image: agentmonorepo-cassiopeia_agent
     restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy
     ports:
-      - "${ORCHESTRA_PORT:-49152}:49152"
+      - "${CASSIOPEIA_PORT:-49152}:49152"
     environment:
-      # orchestra 계정 사용 (전체 접근 권한)
-      - REDIS_URL=redis://orchestra:${REDIS_ORCHESTRA_PASSWORD}@redis:6379
+      # cassiopeia 계정 사용 (전체 접근 권한)
+      - REDIS_URL=redis://cassiopeia:${REDIS_CASSIOPEIA_PASSWORD}@redis:6379
       # 커뮤니티 에이전트에 전달할 제한된 Redis URL (community 계정)
       - REDIS_COMMUNITY_URL=redis://community:${REDIS_COMMUNITY_PASSWORD}@redis:6379
       # LLM 백엔드: gemini | claude | local
@@ -89,8 +89,8 @@ services:
       - CLIENT_API_KEY=${CLIENT_API_KEY}
       # dispatch 메시지 HMAC 서명 키 (권장 — 미설정 시 서명 생략)
       - DISPATCH_HMAC_SECRET=${DISPATCH_HMAC_SECRET}
-      # Redis 비밀번호 (필수 — orchestra 계정용)
-      - REDIS_ORCHESTRA_PASSWORD=${REDIS_ORCHESTRA_PASSWORD}
+      # Redis 비밀번호 (필수 — cassiopeia 계정용)
+      - REDIS_CASSIOPEIA_PASSWORD=${REDIS_CASSIOPEIA_PASSWORD}
       - REDIS_COMMUNITY_PASSWORD=${REDIS_COMMUNITY_PASSWORD}
       # SandboxTool — 운영 모드 선택 (remote | ephemeral | disabled)
       - SANDBOX_MODE=${SANDBOX_MODE:-remote}
@@ -155,7 +155,7 @@ services:
       # 에이전트 이미지 이름 재정의 (선택)
       - AGENT_IMAGE_PLANNING_AGENT=${AGENT_IMAGE_PLANNING_AGENT:-agentmonorepo-planning_agent}
       - AGENT_IMAGE_SLACK_AGENT=${AGENT_IMAGE_SLACK_AGENT:-agentmonorepo-slack_agent}
-      # dispatch 메시지 HMAC 서명 키 (orchestra_agent와 동일한 값 사용)
+      # dispatch 메시지 HMAC 서명 키 (cassiopeia_agent와 동일한 값 사용)
       - DISPATCH_HMAC_SECRET=${DISPATCH_HMAC_SECRET}
     volumes:
       # DooD(Docker-outside-of-Docker): 에이전트 컨테이너 실행을 위해 호스트 소켓 마운트

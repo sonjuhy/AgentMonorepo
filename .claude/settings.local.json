@@ -16,7 +16,20 @@
       "Bash(ls -la /c/WorkSpace/Dev/Python/AgentMonorepo/*.md)",
       "Bash(xargs grep *)",
       "Bash(xargs ls *)",
-      "Bash(iconv -f utf-8 -t utf-8)"
+      "Bash(iconv -f utf-8 -t utf-8)",
+      "Bash(grep -E \"\\\\.py$|\\\\.json$|\\\\.yaml$|\\\\.yml$|\\\\.md$\")",
+      "WebSearch",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:blog.google)",
+      "Bash(git stash *)",
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(./venv/Scripts/pip install *)",
+      "Bash(/c/WorkSpace/Dev/Combination/cassiopeia_sdk/python/venv/Scripts/pip install *)",
+      "Bash(/c/WorkSpace/Dev/Combination/cassiopeia_sdk/python/venv/Scripts/pytest --version)",
+      "Bash(npm test *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git rm *)",
+      "Bash(git mv *)"
     ]
   }
 }

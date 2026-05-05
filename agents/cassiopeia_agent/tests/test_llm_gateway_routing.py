@@ -47,7 +47,7 @@ def mock_cassiopeia():
 
 @pytest_asyncio.fixture
 async def manager(redis, mock_cassiopeia):
-    from agents.cassiopeia_agent.manager import OrchestraManager
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
     from agents.cassiopeia_agent.nlu_engine import NLUEngine
     from agents.cassiopeia_agent.state_manager import StateManager
     from agents.cassiopeia_agent.health_monitor import HealthMonitor
@@ -55,7 +55,7 @@ async def manager(redis, mock_cassiopeia):
     sm = StateManager(redis_client=redis)
     hm = HealthMonitor(redis_client=redis)
     nlu = MagicMock(spec=NLUEngine)
-    mgr = OrchestraManager(
+    mgr = CassiopeiaManager(
         redis_client=redis,
         nlu_engine=nlu,
         state_manager=sm,

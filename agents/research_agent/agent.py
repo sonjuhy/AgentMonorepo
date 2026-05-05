@@ -1,7 +1,7 @@
 """
 Research Agent 구체 구현체
 - 웹 검색 및 정보 수집
-- 처리 결과를 HTTP POST /results 로 오케스트라에 전송
+- 처리 결과를 HTTP POST /results 로 카시오페아에 전송
 - 태스크 수신은 ResearchCassiopeiaListener (cassiopeia-sdk Pub/Sub)가 담당
 """
 
@@ -109,7 +109,7 @@ class ResearchAgent:
 
     async def _report_result(
         self,
-        orchestra_url: str,
+        cassiopeia_url: str,
         task_id: str,
         status: str,
         result_data: dict[str, Any],
@@ -117,7 +117,7 @@ class ResearchAgent:
         reference_id: str | None = None,
         payload_summary: str | None = None,
     ) -> None:
-        """처리 결과를 오케스트라 /results 엔드포인트로 전송합니다. 최대 3회 재시도."""
+        """처리 결과를 카시오페아 /results 엔드포인트로 전송합니다. 최대 3회 재시도."""
         payload = {
             "task_id": task_id,
             "agent": self.agent_name,
@@ -131,7 +131,7 @@ class ResearchAgent:
         if payload_summary:
             payload["payload_summary"] = payload_summary
 
-        url = f"{orchestra_url}/results"
+        url = f"{cassiopeia_url}/results"
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -146,8 +146,8 @@ class ResearchAgent:
                     await asyncio.sleep(wait)
         logger.error("[ResearchAgent] 결과 보고 최종 실패: task_id=%s", task_id)
 
-    async def _handle_task(self, raw: str, orchestra_url: str) -> None:
-        """BLPOP으로 수신한 DispatchMessage를 처리하고 결과를 오케스트라로 전송합니다."""
+    async def _handle_task(self, raw: str, cassiopeia_url: str) -> None:
+        """BLPOP으로 수신한 DispatchMessage를 처리하고 결과를 카시오페아로 전송합니다."""
         task_id = "unknown"
         agent_result: dict[str, Any] = {
             "status": "FAILED",
@@ -195,7 +195,7 @@ class ResearchAgent:
         finally:
             try:
                 await self._report_result(
-                    orchestra_url=orchestra_url,
+                    cassiopeia_url=cassiopeia_url,
                     task_id=task_id,
                     status=agent_result.get("status", "FAILED"),
                     result_data=agent_result.get("result_data", {}),

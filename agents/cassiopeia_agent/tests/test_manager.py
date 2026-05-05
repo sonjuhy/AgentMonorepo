@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agents.cassiopeia_agent.manager import (
-    OrchestraManager,
+    CassiopeiaManager,
     _build_dispatch_message,
     resolve_placeholders,
 )
@@ -136,7 +136,7 @@ class TestReceiveAgentResult:
             "status": "COMPLETED", "result_data": {}, "error": None, "usage_stats": {},
         }
         await manager.receive_agent_result(result)
-        raw = await fake_redis.lpop("orchestra:results:task-1")
+        raw = await fake_redis.lpop("cassiopeia:results:task-1")
         assert raw is not None
         assert json.loads(raw)["status"] == "COMPLETED"
 
@@ -146,7 +146,7 @@ class TestReceiveAgentResult:
 class TestWaitForResult:
     async def test_success_returns_result(self, manager, fake_redis):
         result = {"task_id": "t1", "status": "COMPLETED", "result_data": {"summary": "완료"}}
-        await fake_redis.rpush("orchestra:results:t1", json.dumps(result))
+        await fake_redis.rpush("cassiopeia:results:t1", json.dumps(result))
         outcome = await manager.wait_for_result("t1", timeout=5)
         assert outcome["status"] == "COMPLETED"
 
@@ -159,13 +159,13 @@ class TestWaitForResult:
     async def test_timeout_pushes_to_dlq(self, manager, fake_redis):
         with patch("agents.cassiopeia_agent.manager._BLPOP_TIMEOUT", 1):
             await manager.wait_for_result("nonexistent", timeout=1)
-        dlq_len = await fake_redis.llen("orchestra:dlq")
+        dlq_len = await fake_redis.llen("cassiopeia:dlq")
         assert dlq_len == 1
 
     async def test_dlq_entry_contains_task_id(self, manager, fake_redis):
         with patch("agents.cassiopeia_agent.manager._BLPOP_TIMEOUT", 1):
             await manager.wait_for_result("task-xyz", timeout=1)
-        raw = await fake_redis.lpop("orchestra:dlq")
+        raw = await fake_redis.lpop("cassiopeia:dlq")
         entry = json.loads(raw)
         assert entry["task_id"] == "task-xyz"
         assert entry["reason"] == "timeout"
@@ -176,7 +176,7 @@ class TestWaitForResult:
 class TestPushToDlq:
     async def test_stores_entry(self, manager, fake_redis):
         await manager._push_to_dlq("http_failed", "task-1", {"code": "NETWORK"})
-        raw = await fake_redis.lpop("orchestra:dlq")
+        raw = await fake_redis.lpop("cassiopeia:dlq")
         assert raw is not None
         entry = json.loads(raw)
         assert entry["task_id"] == "task-1"
@@ -429,7 +429,7 @@ class TestRequestUserApproval:
             if action == "request_approval":
                 approval_id = payload["task_id"]
                 await fake_redis.rpush(
-                    f"orchestra:approval:{approval_id}",
+                    f"cassiopeia:approval:{approval_id}",
                     json.dumps({"action": "approve"}),
                 )
             return True
@@ -444,7 +444,7 @@ class TestRequestUserApproval:
             if action == "request_approval":
                 approval_id = payload["task_id"]
                 await fake_redis.rpush(
-                    f"orchestra:approval:{approval_id}",
+                    f"cassiopeia:approval:{approval_id}",
                     json.dumps({"action": "reject"}),
                 )
             return True
@@ -588,7 +588,7 @@ class TestRouteSingleWithApproval:
         async def _fake_send_message(action, payload, receiver):
             if action == "request_approval":
                 import json
-                await fake_redis.rpush(f"orchestra:approval:{payload['task_id']}", json.dumps({"action": "approve"}))
+                await fake_redis.rpush(f"cassiopeia:approval:{payload['task_id']}", json.dumps({"action": "approve"}))
             return True
         manager._cassiopeia.send_message = __import__("unittest.mock").mock.AsyncMock(side_effect=_fake_send_message)
 
@@ -617,7 +617,7 @@ class TestRouteSingleWithApproval:
         async def _fake_send_message(action, payload, receiver):
             if action == "request_approval":
                 import json
-                await fake_redis.rpush(f"orchestra:approval:{payload['task_id']}", json.dumps({"action": "reject"}))
+                await fake_redis.rpush(f"cassiopeia:approval:{payload['task_id']}", json.dumps({"action": "reject"}))
             return True
         manager._cassiopeia.send_message = __import__("unittest.mock").mock.AsyncMock(side_effect=_fake_send_message)
 
@@ -665,7 +665,7 @@ class TestRunPlanWithApproval:
         async def _fake_send_message(action, payload, receiver):
             if action == "request_approval":
                 import json
-                await fake_redis.rpush(f"orchestra:approval:{payload['task_id']}", json.dumps({"action": "approve"}))
+                await fake_redis.rpush(f"cassiopeia:approval:{payload['task_id']}", json.dumps({"action": "approve"}))
             return True
         manager._cassiopeia.send_message = __import__("unittest.mock").mock.AsyncMock(side_effect=_fake_send_message)
 
@@ -689,7 +689,7 @@ class TestRunPlanWithApproval:
         async def _fake_send_message(action, payload, receiver):
             if action == "request_approval":
                 import json
-                await fake_redis.rpush(f"orchestra:approval:{payload['task_id']}", json.dumps({"action": "reject"}))
+                await fake_redis.rpush(f"cassiopeia:approval:{payload['task_id']}", json.dumps({"action": "reject"}))
             return True
         manager._cassiopeia.send_message = __import__("unittest.mock").mock.AsyncMock(side_effect=_fake_send_message)
 

@@ -1,5 +1,5 @@
 """
-OrchestraManager cassiopeia-sdk 마이그레이션 TDD 테스트
+CassiopeiaManager cassiopeia-sdk 마이그레이션 TDD 테스트
 - listen_tasks(): cassiopeia.listen() 사용 검증
 - _dispatch_to_agent(): cassiopeia.send_message() 사용 검증
 - _send_to_comm_agent(): cassiopeia.send_message() 사용 검증
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import fakeredis
 import pytest
 
-from agents.cassiopeia_agent.manager import OrchestraManager
+from agents.cassiopeia_agent.manager import CassiopeiaManager
 from agents.cassiopeia_agent.models import DispatchMessage
 
 
@@ -23,7 +23,7 @@ def _make_sdk_message(action: str = "user_request", payload: dict | None = None)
     msg.action = action
     msg.payload = payload or {}
     msg.sender = "test-sender"
-    msg.receiver = "orchestra"
+    msg.receiver = "cassiopeia"
     return msg
 
 
@@ -98,7 +98,7 @@ def mock_health(fake_redis):
 
 @pytest.fixture
 def manager(fake_redis, mock_cassiopeia, mock_nlu, mock_state, mock_health):
-    return OrchestraManager(
+    return CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=mock_nlu,
         state_manager=mock_state,
@@ -163,11 +163,11 @@ class TestListenTasksCassiopeia:
         assert processed[0]["task_id"] == "task-valid"
 
     async def test_invalid_hmac_pushes_to_dlq(self, fake_redis, mock_cassiopeia, mock_nlu, mock_state, mock_health):
-        """서명 검증 실패 시 orchestra:dlq에 저장되고 태스크를 처리하지 않는다."""
+        """서명 검증 실패 시 cassiopeia:dlq에 저장되고 태스크를 처리하지 않는다."""
         import os
         os.environ["DISPATCH_HMAC_SECRET"] = "test-secret"
         try:
-            mgr = OrchestraManager(
+            mgr = CassiopeiaManager(
                 redis_client=fake_redis,
                 nlu_engine=mock_nlu,
                 state_manager=mock_state,
@@ -187,7 +187,7 @@ class TestListenTasksCassiopeia:
             await mgr.listen_tasks()
 
             assert len(processed) == 0
-            dlq_raw = await fake_redis.lrange("orchestra:dlq", 0, -1)
+            dlq_raw = await fake_redis.lrange("cassiopeia:dlq", 0, -1)
             assert len(dlq_raw) == 1
             dlq_entry = json.loads(dlq_raw[0])
             assert dlq_entry["reason"] == "INVALID_SIGNATURE"
@@ -315,7 +315,7 @@ class TestSendToCommAgentCassiopeia:
 
     async def test_receiver_is_communication(self, manager, mock_cassiopeia):
         """통신 에이전트로 전송할 때 receiver='communication' 이다."""
-        await manager._send_to_comm_agent(self._TASK, "응답", False, "orchestra")
+        await manager._send_to_comm_agent(self._TASK, "응답", False, "cassiopeia")
         kwargs = mock_cassiopeia.send_message.call_args.kwargs
         assert kwargs["receiver"] == "communication"
 
@@ -336,7 +336,7 @@ class TestSendToCommAgentCassiopeia:
             return await original(key, *args, **kwargs)
 
         fake_redis.rpush = _track_rpush
-        await manager._send_to_comm_agent(self._TASK, "msg", False, "orchestra")
+        await manager._send_to_comm_agent(self._TASK, "msg", False, "cassiopeia")
         assert len(agent_queue_calls) == 0
         fake_redis.rpush = original
 

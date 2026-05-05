@@ -1,5 +1,5 @@
 """
-오케스트라 에이전트 데이터 모델 (Python 3.12+)
+카시오페아 에이전트 데이터 모델 (Python 3.12+)
 - NLU 결과 스키마 (Pydantic v2: 구조 검증용)
 - Redis 통신 메시지 스키마 (TypedDict: 내부 타입 힌트용)
 """
@@ -94,8 +94,8 @@ class TaskRequester(TypedDict):
     channel_id: str
 
 
-class OrchestraTask(TypedDict):
-    """소통 에이전트 → 오케스트라 작업 요청 (agent:orchestra:tasks 큐)"""
+class CassiopeiaTask(TypedDict):
+    """소통 에이전트 → 카시오페아 작업 요청 (agent:cassiopeia:tasks 큐)"""
     task_id: str
     session_id: str        # NLU 컨텍스트 주입용 (format: user_id:channel_id)
     requester: TaskRequester
@@ -112,7 +112,7 @@ class RetryInfo(TypedDict):
 
 
 class DispatchMessage(TypedDict):
-    """오케스트라 → 하위 에이전트 작업 지시서 (agent:{name}:tasks 큐)"""
+    """카시오페아 → 하위 에이전트 작업 지시서 (agent:{name}:tasks 큐)"""
     version: str
     task_id: str
     session_id: str
@@ -135,7 +135,7 @@ class AgentResultError(TypedDict):
 
 
 class AgentResult(TypedDict):
-    """하위 에이전트 → 오케스트라 결과 (orchestra:results:{task_id} 큐)"""
+    """하위 에이전트 → 카시오페아 결과 (cassiopeia:results:{task_id} 큐)"""
     task_id: str
     agent: str             # 결과를 보낸 에이전트 이름
     status: str            # COMPLETED | FAILED | WAITING_USER | PROCESSING
@@ -159,8 +159,8 @@ class AgentHealth(TypedDict):
 
 
 class CommAgentMessage(TypedDict):
-    """오케스트라 → 소통 에이전트 전달 메시지 (agent:communication:tasks 큐)"""
-    task_id: str                    # 승인 task_id (orchestra:approval:{task_id} 응답용)
+    """카시오페아 → 소통 에이전트 전달 메시지 (agent:communication:tasks 큐)"""
+    task_id: str                    # 승인 task_id (cassiopeia:approval:{task_id} 응답용)
     content: str                    # 마크다운 본문
     requires_user_approval: bool
     agent_name: str

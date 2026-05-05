@@ -1,11 +1,11 @@
 """
-AgentBuilderHandler — OrchestraManager 연동 에이전트 빌더 핸들러
+AgentBuilderHandler — CassiopeiaManager 연동 에이전트 빌더 핸들러
 
 tools.agent_builder.AgentBuilder를 asyncio 이벤트 루프에서 안전하게 호출합니다.
 AgentBuilder.build()는 subprocess(pip --dry-run 등)를 사용하는 동기 함수이므로
 run_in_executor를 통해 스레드풀에서 실행합니다.
 
-OrchestraManager는 이 핸들러를 직접 호출합니다 (Redis 큐 불필요).
+CassiopeiaManager는 이 핸들러를 직접 호출합니다 (Redis 큐 불필요).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _SUPPORTED_LANGUAGES = frozenset({"python", "javascript"})
 
 class AgentBuilderHandler:
     """
-    OrchestraManager에서 호출하는 AgentBuilder 비동기 래퍼.
+    CassiopeiaManager에서 호출하는 AgentBuilder 비동기 래퍼.
 
     build_agent()는 params dict에서 파라미터를 추출하고
     tools.agent_builder.AgentBuilder.build()를 스레드에서 실행합니다.

@@ -1,6 +1,6 @@
 """
 에이전트 활동 로깅 유틸리티 (Shared Core)
-- 모든 에이전트가 공통으로 사용하여 오케스트라에 로그를 보고합니다.
+- 모든 에이전트가 공통으로 사용하여 카시오페아에 로그를 보고합니다.
 """
 
 import os
@@ -66,9 +66,9 @@ def setup_logging(level: int = logging.INFO):
 logger = logging.getLogger("shared_core.agent_logger")
 
 class AgentLogger:
-    def __init__(self, agent_name: str, orchestra_url: str | None = None):
+    def __init__(self, agent_name: str, cassiopeia_url: str | None = None):
         self.agent_name = agent_name
-        self.orchestra_url = orchestra_url or os.environ.get("ORCHESTRA_URL", "http://127.0.0.1:8001")
+        self.cassiopeia_url = cassiopeia_url or os.environ.get("CASSIOPEIA_URL", "http://127.0.0.1:8001")
 
     async def log_action(
         self, 
@@ -78,8 +78,8 @@ class AgentLogger:
         session_id: str | None = None, 
         payload: dict[str, Any] | None = None
     ):
-        """오케스트라의 /logs 엔드포인트로 활동 로그를 전송합니다."""
-        url = f"{self.orchestra_url}/logs"
+        """카시오페아의 /logs 엔드포인트로 활동 로그를 전송합니다."""
+        url = f"{self.cassiopeia_url}/logs"
         data = {
             "agent_name": self.agent_name,
             "action": action,

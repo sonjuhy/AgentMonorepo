@@ -281,7 +281,7 @@ def _make_next_steps(
         "",
         "4. 실행 (server 모드)",
         f"   docker-compose up {name}_agent",
-        "   # 또는 OrchestraManager를 통해 Redis 큐로 디스패치",
+        "   # 또는 CassiopeiaManager를 통해 Redis 큐로 디스패치",
         "",
         "5. 테스트 (HTTP 직접 호출)",
         f"   curl -X POST http://localhost:{port}/dispatch \\",

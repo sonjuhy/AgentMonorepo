@@ -30,10 +30,10 @@ PYTHON_USER_CODE_EXAMPLE = '''\
 
 규칙:
   - run(params: dict) -> dict 함수를 반드시 구현해야 합니다.
-  - params: OrchestraManager가 전달하는 DispatchMessage.params
+  - params: CassiopeiaManager가 전달하는 DispatchMessage.params
   - 반환값: AgentResult.result_data에 저장될 dict
 
-예시 파라미터 키는 OrchestraManager와 협의하여 정의하세요.
+예시 파라미터 키는 CassiopeiaManager와 협의하여 정의하세요.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from typing import Any
 
 def run(params: dict[str, Any]) -> dict[str, Any]:
     """
-    메인 실행 함수. OrchestraManager가 이 함수를 호출합니다.
+    메인 실행 함수. CassiopeiaManager가 이 함수를 호출합니다.
 
     Args:
         params: DispatchMessage.params (dict)
@@ -65,7 +65,7 @@ JS_USER_CODE_EXAMPLE = '''\
  *
  * 규칙:
  *   - run(params) 함수를 반드시 내보내야 합니다.
- *   - params: OrchestraManager가 전달하는 DispatchMessage.params (Object)
+ *   - params: CassiopeiaManager가 전달하는 DispatchMessage.params (Object)
  *   - 반환값: result_data로 사용될 Object 또는 Promise<Object>
  */
 
@@ -136,7 +136,7 @@ def run(params: dict[str, Any], timeout: int = 60) -> dict[str, Any]:
     user_code.js의 run(params) 함수를 Node.js로 실행합니다.
 
     Args:
-        params: OrchestraManager 파라미터
+        params: CassiopeiaManager 파라미터
         timeout: 실행 제한 시간(초)
 
     Returns:
@@ -281,13 +281,13 @@ from typing import Any, TypedDict
 
 
 class <<<CLASS_NAME>>>TaskParams(TypedDict, total=False):
-    """OrchestraManager → <<<CLASS_NAME>>>Agent DispatchMessage.params 스키마.
+    """CassiopeiaManager → <<<CLASS_NAME>>>Agent DispatchMessage.params 스키마.
     사용자 정의 파라미터 키를 여기에 추가하세요.
     """
 
 
 class <<<CLASS_NAME>>>TaskResult(TypedDict, total=False):
-    """<<<CLASS_NAME>>>Agent → OrchestraManager AgentResult.result_data 스키마.
+    """<<<CLASS_NAME>>>Agent → CassiopeiaManager AgentResult.result_data 스키마.
     run() 함수가 반환하는 키를 여기에 추가하세요.
     """
 '''
@@ -308,7 +308,7 @@ class <<<CLASS_NAME>>>AgentProtocol(Protocol):
     """<<<CLASS_NAME>>>Agent의 공개 인터페이스."""
 
     async def handle_dispatch(self, dispatch_msg: dict[str, Any]) -> dict[str, Any]:
-        """OrchestraManager DispatchMessage를 처리하고 AgentResult를 반환합니다."""
+        """CassiopeiaManager DispatchMessage를 처리하고 AgentResult를 반환합니다."""
         ...
 '''
 
@@ -318,8 +318,8 @@ class <<<CLASS_NAME>>>AgentProtocol(Protocol):
 REDIS_LISTENER_PY = '''\
 """
 <<<CLASS_NAME>>> Agent Redis 리스너 — 자동 생성 (agent-builder)
-- OrchestraManager가 agent:<<<SNAKE_NAME>>>:tasks 큐에 push한 DispatchMessage를 BLPOP으로 수신
-- <<<CLASS_NAME>>>Agent.handle_dispatch()에 위임 후 orchestra /results로 결과 보고
+- CassiopeiaManager가 agent:<<<SNAKE_NAME>>>:tasks 큐에 push한 DispatchMessage를 BLPOP으로 수신
+- <<<CLASS_NAME>>>Agent.handle_dispatch()에 위임 후 cassiopeia /results로 결과 보고
 - agent:<<<SNAKE_NAME>>>:health Redis Hash를 주기적으로 갱신 (HEARTBEAT_INTERVAL 환경변수)
 """
 from __future__ import annotations
@@ -340,7 +340,7 @@ logger = logging.getLogger("<<<SNAKE_NAME>>>_agent.redis_listener")
 
 _QUEUE_KEY = "agent:<<<SNAKE_NAME>>>:tasks"
 _HEALTH_KEY = "agent:<<<SNAKE_NAME>>>:health"
-_DLQ_KEY = "orchestra:dlq"
+_DLQ_KEY = "cassiopeia:dlq"
 _HEARTBEAT_INTERVAL: int = int(os.environ.get("HEARTBEAT_INTERVAL", "15"))
 _BLPOP_TIMEOUT: int = int(os.environ.get("BLPOP_TIMEOUT", "5"))
 _HTTP_REPORT_TIMEOUT: float = float(os.environ.get("HTTP_REPORT_TIMEOUT", "10.0"))
@@ -348,24 +348,24 @@ _HEALTH_TTL: int = _HEARTBEAT_INTERVAL * 4
 
 
 class <<<CLASS_NAME>>>RedisListener:
-    """OrchestraManager ↔ <<<CLASS_NAME>>>Agent 연결 브릿지."""
+    """CassiopeiaManager ↔ <<<CLASS_NAME>>>Agent 연결 브릿지."""
 
     def __init__(
         self,
         agent: <<<CLASS_NAME>>>Agent,
         redis_url: str | None = None,
-        orchestra_url: str | None = None,
+        cassiopeia_url: str | None = None,
     ) -> None:
         self._agent = agent
         # 커뮤니티 에이전트는 제한된 권한의 REDIS_COMMUNITY_URL을 우선 사용합니다.
-        # REDIS_COMMUNITY_URL은 agent:*:tasks, agent:*:health, orchestra:results:*, orchestra:dlq
+        # REDIS_COMMUNITY_URL은 agent:*:tasks, agent:*:health, cassiopeia:results:*, cassiopeia:dlq
         # 키만 접근 가능한 'community' 계정 URL입니다.
         self._redis_url = redis_url or os.environ.get(
             "REDIS_COMMUNITY_URL",
             os.environ.get("REDIS_URL", "redis://localhost:6379"),
         )
-        self._orchestra_url = orchestra_url or os.environ.get(
-            "ORCHESTRA_URL", "http://orchestra-agent:8001"
+        self._cassiopeia_url = cassiopeia_url or os.environ.get(
+            "CASSIOPEIA_URL", "http://cassiopeia-agent:8001"
         )
         self._redis: aioredis.Redis | None = None
         self._current_task_count: int = 0
@@ -402,7 +402,7 @@ class <<<CLASS_NAME>>>RedisListener:
 
     async def handle_task(self, raw: str) -> None:
         task_id = "unknown"
-        callback_api_key = os.environ.get("ORCHESTRA_CLIENT_KEY", "")
+        callback_api_key = os.environ.get("CASSIOPEIA_CLIENT_KEY", "")
         agent_result: dict[str, Any] = {
             "task_id": "unknown",
             "status": "FAILED",
@@ -414,7 +414,7 @@ class <<<CLASS_NAME>>>RedisListener:
             dispatch_msg: dict[str, Any] = json.loads(raw)
             task_id = dispatch_msg.get("task_id", "unknown")
             agent_result["task_id"] = task_id
-            # dispatch 메시지 메타데이터에서 콜백 인증 키 추출 (오케스트라가 주입)
+            # dispatch 메시지 메타데이터에서 콜백 인증 키 추출 (카시오페아가 주입)
             callback_api_key = (
                 dispatch_msg.get("metadata", {}).get("callback_api_key")
                 or callback_api_key
@@ -470,7 +470,7 @@ class <<<CLASS_NAME>>>RedisListener:
             "usage_stats": {},
         }
         headers = {"X-API-Key": callback_api_key} if callback_api_key else {}
-        url = f"{self._orchestra_url}/results"
+        url = f"{self._cassiopeia_url}/results"
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=_HTTP_REPORT_TIMEOUT) as client:
@@ -576,7 +576,7 @@ async def lifespan(app: FastAPI):
     _ctx.listener = <<<CLASS_NAME>>>RedisListener(
         agent=_ctx.agent,
         redis_url=os.environ.get("REDIS_URL"),
-        orchestra_url=os.environ.get("ORCHESTRA_URL"),
+        cassiopeia_url=os.environ.get("CASSIOPEIA_URL"),
     )
     _ctx.listen_task = asyncio.create_task(
         _ctx.listener.listen_tasks(), name="<<<SNAKE_NAME>>>_listen"
@@ -799,9 +799,9 @@ COMPOSE_SNIPPET = '''\
     environment:
       # 커뮤니티 에이전트는 제한된 권한의 community 계정 URL만 사용합니다 (ACL 적용).
       - REDIS_COMMUNITY_URL=${REDIS_COMMUNITY_URL}
-      - ORCHESTRA_URL=${ORCHESTRA_URL:-http://orchestra-agent:8001}
-      # 오케스트라 HTTP 콜백 인증 키 (/results, /logs 등 호출 시 X-API-Key 헤더에 사용)
-      - ORCHESTRA_CLIENT_KEY=${CLIENT_API_KEY}
+      - CASSIOPEIA_URL=${CASSIOPEIA_URL:-http://cassiopeia-agent:8001}
+      # 카시오페아 HTTP 콜백 인증 키 (/results, /logs 등 호출 시 X-API-Key 헤더에 사용)
+      - CASSIOPEIA_CLIENT_KEY=${CLIENT_API_KEY}
       - HOST=0.0.0.0
       - PORT=<<<PORT>>>
       # /dispatch 엔드포인트 보호용 시크릿 (미설정 시 /dispatch 비활성화)

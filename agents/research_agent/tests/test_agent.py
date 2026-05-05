@@ -95,7 +95,7 @@ async def test_agent_handle_task_storage(mock_config, mock_pipeline_components):
         "params": {"query": "test query"}
     })
     
-    await agent._handle_task(raw_msg, "http://orchestra")
+    await agent._handle_task(raw_msg, "http://cassiopeia")
     
     # Verify storage was called correctly
     agent._storage.save_data.assert_awaited_once()

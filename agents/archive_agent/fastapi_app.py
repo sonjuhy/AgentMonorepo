@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
     _ctx.listener = ArchiveCassiopeiaListener(
         archive_agent=_ctx.agent,
         redis_url=os.environ.get("REDIS_URL"),
-        orchestra_url=os.environ.get("ORCHESTRA_URL"),
+        cassiopeia_url=os.environ.get("CASSIOPEIA_URL"),
     )
 
     _ctx.listen_task = asyncio.create_task(

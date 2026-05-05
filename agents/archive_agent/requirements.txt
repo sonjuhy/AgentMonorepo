@@ -7,7 +7,7 @@ httpx>=0.27.0
 anthropic>=0.40.0
 google-genai>=1.0.0
 
-# Redis (server 모드: OrchestraManager 연동)
+# Redis (server 모드: CassiopeiaManager 연동)
 redis[hiredis]>=5.0.0
 
 # FastAPI & ASGI (server 모드)

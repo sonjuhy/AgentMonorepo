@@ -1,9 +1,9 @@
 """
 Discord 소통 에이전트 (DiscordCommAgent)
 - Discord API와 cassiopeia Pub/Sub 사이의 양방향 게이트웨이
-- Inbound:  Discord 메시지 → on_user_message → cassiopeia Pub/Sub agent:orchestra
+- Inbound:  Discord 메시지 → on_user_message → cassiopeia Pub/Sub agent:cassiopeia
 - Outbound: cassiopeia Pub/Sub agent:discord_communication_agent → listen_system_results → Discord
-- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis orchestra:approval:{task_id}
+- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis cassiopeia:approval:{task_id}
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ class DiscordCommAgent:
 
     async def on_user_message(self, event: DiscordEvent, message: discord.Message) -> None:
         """
-        Discord 메시지를 수신하여 오케스트라 Redis 큐로 전달합니다.
+        Discord 메시지를 수신하여 카시오페아 Redis 큐로 전달합니다.
 
         Args:
             event (DiscordEvent): 파싱된 Discord 이벤트.
@@ -178,7 +178,7 @@ class DiscordCommAgent:
         await cassiopeia.send_message(
             action="user_request",
             payload=sign_task(task),
-            receiver="orchestra",
+            receiver="cassiopeia",
         )
 
         await self._redis.save_task_context(task_id, {
@@ -190,7 +190,7 @@ class DiscordCommAgent:
         })
 
         logger.info(
-            "[DiscordAgent] 오케스트라 전달 — task_id=%s user=%s message_id=%s",
+            "[DiscordAgent] 카시오페아 전달 — task_id=%s user=%s message_id=%s",
             task_id, user_id, message_id,
         )
 

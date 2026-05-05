@@ -1,13 +1,13 @@
 # OVERVIEW OF THE ORCHESTRA AGENT
 
-This document outlines the core functionality, architecture, and usage of the orchestra agent.
+This document outlines the core functionality, architecture, and usage of the cassiopeia agent.
 
 ## Functionality
 
-The orchestra agent serves as the central nervous system of our multi-agent system. Its primary responsibilities include:
+The cassiopeia agent serves as the central nervous system of our multi-agent system. Its primary responsibilities include:
 
 1.  **Intent Recognition and Analysis:** Understanding user requests and breaking them down into actionable tasks.
-2.  **Task Orchestration:** Planning and sequencing tasks for various specialized agents.
+2.  **Task Cassiopeiation:** Planning and sequencing tasks for various specialized agents.
 3.  **Agent Coordination:** Managing the lifecycle and communication between different agents.
 4.  **Information Synthesis:** Aggregating and presenting results from multiple agents.
 5.  **Context Management:** Maintaining conversational context and state.
@@ -18,7 +18,7 @@ The orchestra agent serves as the central nervous system of our multi-agent syst
 The agent follows a modular design, with distinct components responsible for specific functions. Key modules include:
 
 *   **`main.py`:** Entry point and main application logic, including FastAPI server setup.
-*   **`manager.py`:** Handles the core orchestration logic, agent lifecycle, and communication.
+*   **`manager.py`:** Handles the core cassiopeiation logic, agent lifecycle, and communication.
 *   **`nlu_engine.py`:** Processes natural language understanding tasks.
 *   **`state_manager.py`:** Manages the state of the system and ongoing tasks.
 *   **`health_monitor.py`:** Monitors the health and responsiveness of other agents.
@@ -33,7 +33,7 @@ The agent follows a modular design, with distinct components responsible for spe
 
 ## Usage
 
-### Running the Orchestra Agent
+### Running the Cassiopeia Agent
 
 The agent can be run as a FastAPI application.
 
@@ -72,4 +72,4 @@ This project is licensed under the Apache 2.0 License.
 
 *   The agent relies on Redis for message brokering. Ensure Redis is running and accessible.
 *   Environment variables can be used to configure LLM backends and other settings.
-*   The `agents/cassiopeia_agent` directory contains the primary logic for the orchestrator.
+*   The `agents/cassiopeia_agent` directory contains the primary logic for the cassiopeiator.

@@ -63,7 +63,7 @@ class UnifiedArchiveAgent:
         # 1. 대상 결정 (Routing Logic)
         target = "notion" # 기본값
 
-        # params에 명시된 경우 (Orchestra가 이미 판단한 경우)
+        # params에 명시된 경우 (Cassiopeia가 이미 판단한 경우)
         if params.get("source") in ["obsidian", "notion"]:
             target = params.get("source")
         elif user_text:

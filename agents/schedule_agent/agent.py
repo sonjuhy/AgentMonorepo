@@ -1,8 +1,8 @@
 """
 ScheduleAgent 구체 구현체
 - Google Calendar API 연동
-- cassiopeia-sdk CassiopeiaClient.listen()으로 오케스트라 디스패치 수신
-- 처리 결과를 HTTP POST /results 로 오케스트라에 전송
+- cassiopeia-sdk CassiopeiaClient.listen()으로 카시오페아 디스패치 수신
+- 처리 결과를 HTTP POST /results 로 카시오페아에 전송
 """
 
 import asyncio
@@ -25,13 +25,13 @@ logger = logging.getLogger("schedule_agent.agent")
 
 _HEARTBEAT_INTERVAL: int = int(os.environ.get("HEARTBEAT_INTERVAL", "15"))
 _HTTP_REPORT_TIMEOUT: float = float(os.environ.get("HTTP_REPORT_TIMEOUT", "10.0"))
-_DLQ_KEY = "orchestra:dlq"
+_DLQ_KEY = "cassiopeia:dlq"
 
 
 class ScheduleAgent:
     """
     일정 관리 에이전트.
-    cassiopeia-sdk를 사용해 오케스트라로부터 태스크 메시지를 수신합니다.
+    cassiopeia-sdk를 사용해 카시오페아로부터 태스크 메시지를 수신합니다.
     """
 
     agent_name: str = "schedule-agent"
@@ -87,14 +87,14 @@ class ScheduleAgent:
 
     async def _report_result(
         self,
-        orchestra_url: str,
+        cassiopeia_url: str,
         task_id: str,
         status: str,
         result_data: dict[str, Any],
         error: dict[str, Any] | None,
         redis: aioredis.Redis | None = None,
     ) -> None:
-        """처리 결과를 오케스트라 /results 엔드포인트로 전송합니다. 최대 3회 재시도 후 DLQ 저장."""
+        """처리 결과를 카시오페아 /results 엔드포인트로 전송합니다. 최대 3회 재시도 후 DLQ 저장."""
         payload = {
             "task_id": task_id,
             "agent": self.agent_name,
@@ -103,7 +103,7 @@ class ScheduleAgent:
             "error": error,
             "usage_stats": {},
         }
-        url = f"{orchestra_url}/results"
+        url = f"{cassiopeia_url}/results"
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=_HTTP_REPORT_TIMEOUT) as client:
@@ -128,10 +128,10 @@ class ScheduleAgent:
     async def _handle_task(
         self,
         msg: SdkAgentMessage,
-        orchestra_url: str,
+        cassiopeia_url: str,
         redis: aioredis.Redis | None = None,
     ) -> None:
-        """cassiopeia AgentMessage를 처리하고 결과를 오케스트라로 전송합니다.
+        """cassiopeia AgentMessage를 처리하고 결과를 카시오페아로 전송합니다.
 
         payload 구조:
             {
@@ -178,7 +178,7 @@ class ScheduleAgent:
         finally:
             try:
                 await self._report_result(
-                    orchestra_url=orchestra_url,
+                    cassiopeia_url=cassiopeia_url,
                     task_id=task_id,
                     status=agent_result.get("status", "FAILED"),
                     result_data=agent_result.get("result_data", {}),
@@ -192,7 +192,7 @@ class ScheduleAgent:
         redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
         if "localhost" in redis_url:
             redis_url = redis_url.replace("localhost", "127.0.0.1")
-        orchestra_url = os.environ.get("ORCHESTRA_URL", "http://orchestra-agent:8001")
+        cassiopeia_url = os.environ.get("CASSIOPEIA_URL", "http://cassiopeia-agent:8001")
         health_key = f"agent:{self.agent_name}:health"
 
         import re
@@ -225,7 +225,7 @@ class ScheduleAgent:
 
         try:
             async for msg in cassiopeia.listen():
-                asyncio.create_task(self._handle_task(msg, orchestra_url, redis))
+                asyncio.create_task(self._handle_task(msg, cassiopeia_url, redis))
         except asyncio.CancelledError:
             logger.info("[ScheduleAgent] 종료")
         finally:

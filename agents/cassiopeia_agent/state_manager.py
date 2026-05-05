@@ -203,7 +203,7 @@ class StateManager:
         for msg in history:
             role = msg["role"]
             if provider == "gemini":
-                role = "model" if role in ["assistant", "orchestra", "cassiopeia_agent"] else "user"
+                role = "model" if role in ["assistant", "cassiopeia", "cassiopeia_agent"] else "user"
             context.append({"role": role, "content": msg["content"]})
         return context
 

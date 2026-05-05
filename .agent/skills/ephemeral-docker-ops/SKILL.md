@@ -1,7 +1,7 @@
 # Skill: ephemeral-docker-ops
 
 ## Description
-이 스킬은 `Notion-Agent-Orchestrator` 모노리포 환경에서 에이전트가 Docker 컨테이너를 설계, 빌드, 테스트할 때 준수해야 하는 초경량화 및 단발성(Ephemeral) 실행 원칙을 정의합니다. 
+이 스킬은 `Notion-Agent-Cassiopeia` 모노리포 환경에서 에이전트가 Docker 컨테이너를 설계, 빌드, 테스트할 때 준수해야 하는 초경량화 및 단발성(Ephemeral) 실행 원칙을 정의합니다. 
 
 ## Principles (원리 및 근거)
 1. **Zero-Idle Memory (대기 메모리 제로화)**: 대상 배포 환경은 리소스가 극히 제한된 저사양 우분투 서버입니다. 데몬(Daemon)이나 `while True` 루프 형태의 상주 프로세스를 금지하고, 스케줄러(Cron)에 의해 1회 실행 후 즉시 소멸(`--rm`)하는 구조를 채택하여 유휴 상태의 메모리 점유를 0MB로 유지합니다.

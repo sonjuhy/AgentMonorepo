@@ -45,7 +45,7 @@ def agent(agent_config):
 
 def _make_sdk_message(action: str, task_id: str = "t-001", params: dict | None = None) -> SdkAgentMessage:
     return SdkAgentMessage(
-        sender="orchestra",
+        sender="cassiopeia",
         receiver="file-agent",
         action=action,
         payload={"task_id": task_id, "params": params or {}},
@@ -70,7 +70,7 @@ class TestHandleTask:
         report = AsyncMock()
         agent._report_result = report
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         report.assert_awaited_once()
         kwargs = report.await_args.kwargs
@@ -81,7 +81,7 @@ class TestHandleTask:
         msg = _make_sdk_message("write_file", params={"file_path": str(target), "content": "테스트"})
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         assert target.exists()
         assert target.read_text(encoding="utf-8") == "테스트"
@@ -91,7 +91,7 @@ class TestHandleTask:
         report = AsyncMock()
         agent._report_result = report
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = report.await_args.kwargs
         assert kwargs["status"] == "FAILED"
@@ -103,7 +103,7 @@ class TestHandleTask:
         report = AsyncMock()
         agent._report_result = report
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = report.await_args.kwargs
         assert kwargs["task_id"] == "my-task-99"
@@ -112,7 +112,7 @@ class TestHandleTask:
         msg = _make_sdk_message("unknown_xyz")
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["status"] == "FAILED"
@@ -123,7 +123,7 @@ class TestHandleTask:
         msg = _make_sdk_message("delete_file", params={"file_path": str(target)})
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         assert not target.exists()
         kwargs = agent._report_result.await_args.kwargs
@@ -222,7 +222,7 @@ class TestRun:
 # ---------------------------------------------------------------------------
 
 class TestReportResult:
-    async def test_report_result_posts_to_orchestra(self, agent):
+    async def test_report_result_posts_to_cassiopeia(self, agent):
         import httpx
         with patch("agents.file_agent.agent.httpx.AsyncClient") as mock_client_cls:
             mock_resp = MagicMock()
@@ -233,7 +233,7 @@ class TestReportResult:
             mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
             await agent._report_result(
-                orchestra_url="http://orchestra:8001",
+                cassiopeia_url="http://cassiopeia:8001",
                 task_id="t-001",
                 status="COMPLETED",
                 result_data={"summary": "ok"},
@@ -242,7 +242,7 @@ class TestReportResult:
 
         mock_http.post.assert_awaited_once()
         call_kwargs = mock_http.post.call_args
-        assert "http://orchestra:8001/results" in call_kwargs[0]
+        assert "http://cassiopeia:8001/results" in call_kwargs[0]
 
     async def test_report_result_sends_to_dlq_after_max_retries(self, agent):
         with patch("agents.file_agent.agent.httpx.AsyncClient") as mock_cls:
@@ -256,7 +256,7 @@ class TestReportResult:
 
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 await agent._report_result(
-                    orchestra_url="http://orchestra:8001",
+                    cassiopeia_url="http://cassiopeia:8001",
                     task_id="failed-task",
                     status="FAILED",
                     result_data={},
@@ -266,4 +266,4 @@ class TestReportResult:
 
         mock_redis.rpush.assert_awaited_once()
         dlq_call = mock_redis.rpush.call_args
-        assert "orchestra:dlq" in dlq_call[0]
+        assert "cassiopeia:dlq" in dlq_call[0]

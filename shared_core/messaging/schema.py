@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field, ConfigDict
 
-type AgentName = Literal["orchestra", "schedule", "file", "slack", "planning", "research"]
+type AgentName = Literal["cassiopeia", "schedule", "file", "slack", "planning", "research"]
 type ActionName = str
 
 class AgentMessage(BaseModel):

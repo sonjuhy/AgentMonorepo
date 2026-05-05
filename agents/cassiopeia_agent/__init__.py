@@ -6,7 +6,7 @@ from .intent_analyzer import (
     GeminiCLIIntentAnalyzer,
     IntentAnalyzerProtocol,
 )
-from .interfaces import OrchestraAgentProtocol, AgentRegistryProtocol
+from .interfaces import CassiopeiaAgentProtocol, AgentRegistryProtocol
 
 __all__ = [
     "AgentRegistry",
@@ -15,6 +15,6 @@ __all__ = [
     "ClaudeCLIIntentAnalyzer",
     "GeminiCLIIntentAnalyzer",
     "IntentAnalyzerProtocol",
-    "OrchestraAgentProtocol",
+    "CassiopeiaAgentProtocol",
     "AgentRegistryProtocol",
 ]

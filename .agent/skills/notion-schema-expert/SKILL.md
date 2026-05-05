@@ -1,7 +1,7 @@
 # Skill: notion-schema-expert
 
 ## Description
-이 스킬은 `Notion-Agent-Orchestrator` 모노리포 환경에서 에이전트가 Notion API와 통신할 때, 복잡한 JSON 페이로드(Payload)를 정확히 파싱하고 시스템 내부의 데이터베이스 스키마와 동기화하기 위한 표준 규격을 정의합니다.
+이 스킬은 `Notion-Agent-Cassiopeia` 모노리포 환경에서 에이전트가 Notion API와 통신할 때, 복잡한 JSON 페이로드(Payload)를 정확히 파싱하고 시스템 내부의 데이터베이스 스키마와 동기화하기 위한 표준 규격을 정의합니다.
 
 ## Principles (원리 및 근거)
 1. **결정론적(Deterministic) 데이터 매핑**: Notion 페이지 속성(Properties)은 단순 키-값 쌍이 아니라 깊은 중첩 딕셔너리(Deeply nested dictionary) 구조입니다. 에이전트의 기계적 환각을 방지하고 런타임 에러(KeyError)를 차단하기 위해, 추측성 파싱을 금지하고 명시된 스키마 구조에 기반한 안전한 데이터 추출 로직을 강제합니다.

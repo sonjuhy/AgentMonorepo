@@ -69,12 +69,12 @@ async def test_route_single_forces_approval_for_destructive_action(
 ):
     """
     LLM이 requires_user_approval=False 로 반환한 delete_file 액션도
-    OrchestraManager 가 승인 요청을 발행해야 한다.
+    CassiopeiaManager 가 승인 요청을 발행해야 한다.
     """
-    from agents.cassiopeia_agent.manager import OrchestraManager
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
     from agents.cassiopeia_agent.models import SingleNLUResult
 
-    manager = OrchestraManager(
+    manager = CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=state_manager,
@@ -123,10 +123,10 @@ async def test_route_single_skips_approval_for_safe_action(
     fake_redis, nlu_engine, state_manager, health_monitor
 ):
     """read_file 같은 안전 액션은 승인 없이 바로 dispatch 되어야 한다."""
-    from agents.cassiopeia_agent.manager import OrchestraManager
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
     from agents.cassiopeia_agent.models import SingleNLUResult
 
-    manager = OrchestraManager(
+    manager = CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=state_manager,
@@ -179,10 +179,10 @@ async def test_run_plan_forces_approval_for_destructive_step(
     fake_redis, nlu_engine, state_manager, health_monitor
 ):
     """멀티스텝 계획에서도 write_file 스텝은 서버사이드 승인이 강제된다."""
-    from agents.cassiopeia_agent.manager import OrchestraManager
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
     from agents.cassiopeia_agent.models import MultiStepNLUResult, PlanStep, PlanStepMetadata, NLUMetadata
 
-    manager = OrchestraManager(
+    manager = CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu_engine,
         state_manager=state_manager,

@@ -1,7 +1,7 @@
 # Skill: monorepo-cicd-router
 
 ## Description
-이 스킬은 `Notion-Agent-Orchestrator` 모노리포 환경에서 에이전트가 GitHub Actions 기반의 CI/CD 파이프라인(YAML)을 작성하거나 수정할 때 적용되는 원칙을 정의합니다. 대상 인프라는 리소스가 제한된 우분투 서버이며, GHCR(GitHub Container Registry)을 경유하는 SSH 원격 배포 방식을 사용합니다.
+이 스킬은 `Notion-Agent-Cassiopeia` 모노리포 환경에서 에이전트가 GitHub Actions 기반의 CI/CD 파이프라인(YAML)을 작성하거나 수정할 때 적용되는 원칙을 정의합니다. 대상 인프라는 리소스가 제한된 우분투 서버이며, GHCR(GitHub Container Registry)을 경유하는 SSH 원격 배포 방식을 사용합니다.
 
 ## Principles (원리 및 근거)
 1. **Selective Deployment (선택적 배포 최적화)**: 모노리포의 핵심은 변경된 모듈만 격리하여 빌드하는 것입니다. 특정 에이전트(예: `planning_agent`)의 코드나 공통 코어(`shared_core`)가 수정되었을 때만 해당 에이전트의 워크플로우가 트리거되도록 경로 필터링(Path Filtering)을 강제하여 빌드 자원 낭비를 막습니다.

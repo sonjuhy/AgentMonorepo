@@ -1,5 +1,5 @@
 """
-Orchestra Agent FastAPI 서버
+Cassiopeia Agent FastAPI 서버
 
 엔드포인트 목록:
   [시스템]
@@ -110,7 +110,7 @@ from .admin_router import router as admin_router
 from .error_messages import build_error_response, get_user_message
 from .rate_limiter import RateLimiter
 from .health_monitor import HealthMonitor
-from .manager import OrchestraManager
+from .manager import CassiopeiaManager
 from .nlu_engine import build_nlu_engine
 from .sandbox_tool import SandboxTool
 from .state_manager import StateManager
@@ -143,7 +143,7 @@ _KNOWN_AGENTS = [
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI 수명 주기 관리: 초기화 → 백그라운드 실행 → 종료."""
-    logger.info("[Lifespan] Orchestra Agent 시작")
+    logger.info("[Lifespan] Cassiopeia Agent 시작")
 
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379").replace(
         "localhost", "127.0.0.1"
@@ -204,7 +204,7 @@ async def lifespan(app: FastAPI):
         logger.error("[Lifespan] NLU 초기화 실패: %s", exc)
         raise RuntimeError(f"NLU 초기화 실패: {exc}")
 
-    ctx.manager = OrchestraManager(
+    ctx.manager = CassiopeiaManager(
         redis_client=ctx.redis_client,
         nlu_engine=nlu_engine,
         state_manager=ctx.state_manager,
@@ -212,27 +212,25 @@ async def lifespan(app: FastAPI):
         sandbox_tool=ctx.sandbox_tool,
     )
 
-    # 기본 에이전트 레지스트리 등록
+    # 기본 코어 에이전트 레지스트리 등록 (비즈니스 로직 에이전트 하드코딩 제거)
     # (caps, lifecycle_type, nlu_description, permission_preset) — nlu_description 생략 시 ""
     _AGENT_CONFIGS: dict[str, tuple] = {
-        "communication_agent": (["send_message", "ask_clarification"], "long_running", "", "standard"),
-        "archive_agent": (
-            ["list_databases", "get_page", "create_page", "search"],
-            "long_running", "", "standard",
+        "communication_agent": (
+            ["send_message", "ask_clarification"], 
+            "long_running", 
+            "- communication_agent: 사용자 질문 및 응답 (actions: ask_clarification)", 
+            "standard"
         ),
-        # sandbox_agent: 오케스트라 내부 도구로 편입 — ephemeral 등록으로 헬스체크 없이 항상 가용
+        # sandbox_agent: 카시오페아 내부 도구로 편입 — ephemeral 등록으로 헬스체크 없이 항상 가용
         "sandbox_agent": (
             ["execute_code", "run_code"],
             "ephemeral",
             (
-                "sandbox_agent: Python/JavaScript/Bash 코드를 격리된 VM(Docker/Firecracker)에서 실행합니다. "
+                "- sandbox_agent: Python/JavaScript/Bash 코드를 격리된 VM(Docker/Firecracker)에서 실행합니다. "
                 "params: {language: str, code: str, stdin?: str, timeout?: int, memory_mb?: int}"
             ),
             "minimal"
         ),
-        "file_agent": (["read_file", "write_file", "search_files"], "ephemeral", "", "standard"),
-        "research_agent": (["search_and_report"], "ephemeral", "", "trusted"),
-        "calendar_agent": (["create_event", "query_events"], "ephemeral", "", "trusted"),
     }
     for agent_name, config in _AGENT_CONFIGS.items():
         caps, ltype = config[0], config[1]
@@ -242,7 +240,7 @@ async def lifespan(app: FastAPI):
             agent_name, caps, lifecycle_type=ltype, nlu_description=nlu_desc, permission_preset=preset
         )
 
-    ctx.cassiopeia_client = CassiopeiaClient(agent_id="orchestra-api", redis_url=redis_url)
+    ctx.cassiopeia_client = CassiopeiaClient(agent_id="cassiopeia-api", redis_url=redis_url)
     await ctx.cassiopeia_client.connect()
     logger.info("[Lifespan] Cassiopeia 클라이언트 연결 완료")
 
@@ -256,10 +254,10 @@ async def lifespan(app: FastAPI):
     logger.info("[Lifespan] LLM Gateway 초기화 완료")
 
     ctx.listen_task = asyncio.create_task(
-        ctx.manager.listen_tasks(), name="orchestra_listen_tasks"
+        ctx.manager.listen_tasks(), name="cassiopeia_listen_tasks"
     )
     ctx.monitor_task = asyncio.create_task(
-        ctx.health_monitor.monitor_loop(interval=30), name="orchestra_health_monitor"
+        ctx.health_monitor.monitor_loop(interval=30), name="cassiopeia_health_monitor"
     )
 
     yield
@@ -284,10 +282,10 @@ async def lifespan(app: FastAPI):
 # ── FastAPI 앱 ────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Orchestra Agent API",
+    title="Cassiopeia Agent API",
     version="2.0.0",
     description=(
-        "AI 에이전트 오케스트라 지휘자 — 외부 제어 및 관리자 API\n\n"
+        "AI 에이전트 카시오페아 지휘자 — 외부 제어 및 관리자 API\n\n"
         "관리자 GUI 전용 엔드포인트는 `/admin` 접두사를 사용합니다."
     ),
     lifespan=lifespan,
@@ -464,7 +462,7 @@ async def _fire_webhook(url: str, payload: dict[str, Any]) -> None:
 
 @app.post("/logs", tags=["에이전트"], dependencies=[Depends(verify_client_key)])
 async def receive_log(body: AgentLogBody) -> dict[str, Any]:
-    # 대용량 로그로 인한 오케스트라 DB 부하 방지 (Hybrid Architecture)
+    # 대용량 로그로 인한 카시오페아 DB 부하 방지 (Hybrid Architecture)
     message = body.message if len(body.message) <= 1000 else body.message[:1000] + "...(truncated)"
     
     def mask_secrets(text: str) -> str:
@@ -580,7 +578,7 @@ async def submit_task(body: SubmitTaskBody, request: Request) -> dict[str, Any]:
     await ctx.cassiopeia_client.send_message(
         action="user_request",
         payload=sign_task(task),
-        receiver="orchestra",
+        receiver="cassiopeia",
     )
 
     # ── 작업 히스토리 저장 ─────────────────────────────────────────────────────
@@ -932,8 +930,8 @@ async def update_llm_api_key(
 
 # ── 승인 API ──────────────────────────────────────────────────────────────────
 
-_APPROVAL_META_PREFIX = "orchestra:approval_meta:"
-_APPROVAL_QUEUE_PREFIX = "orchestra:approval:"
+_APPROVAL_META_PREFIX = "cassiopeia:approval_meta:"
+_APPROVAL_QUEUE_PREFIX = "cassiopeia:approval:"
 
 
 @app.get("/approval/{approval_id}", tags=["승인"],
@@ -994,7 +992,7 @@ async def respond_approval(approval_id: str, body: ApprovalRespondBody) -> dict[
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Orchestra Agent Server")
+    parser = argparse.ArgumentParser(description="Cassiopeia Agent Server")
     parser.add_argument(
         "--llm",
         type=str,

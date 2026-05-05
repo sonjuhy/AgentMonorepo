@@ -51,7 +51,7 @@ def agent(agent_config, mock_calendar_provider):
 
 def _make_sdk_message(action: str, task_id: str = "t-001", params: dict | None = None) -> SdkAgentMessage:
     return SdkAgentMessage(
-        sender="orchestra",
+        sender="cassiopeia",
         receiver="schedule-agent",
         action=action,
         payload={"task_id": task_id, "params": params or {}},
@@ -76,7 +76,7 @@ class TestHandleTask:
         })
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["status"] == "COMPLETED"
@@ -93,7 +93,7 @@ class TestHandleTask:
         })
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["status"] == "COMPLETED"
@@ -103,7 +103,7 @@ class TestHandleTask:
         msg = _make_sdk_message("unknown_calendar_action")
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["status"] == "FAILED"
@@ -116,7 +116,7 @@ class TestHandleTask:
         })
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["task_id"] == "my-sched-99"
@@ -133,7 +133,7 @@ class TestHandleTask:
         })
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["status"] == "COMPLETED"
@@ -143,7 +143,7 @@ class TestHandleTask:
         msg = _make_sdk_message("remove_schedule", params={"event_id": "event-to-delete"})
         agent._report_result = AsyncMock()
 
-        await agent._handle_task(msg, "http://orchestra:8001")
+        await agent._handle_task(msg, "http://cassiopeia:8001")
 
         kwargs = agent._report_result.await_args.kwargs
         assert kwargs["status"] == "COMPLETED"
@@ -240,7 +240,7 @@ class TestRun:
 # ---------------------------------------------------------------------------
 
 class TestReportResult:
-    async def test_report_result_posts_to_orchestra(self, agent):
+    async def test_report_result_posts_to_cassiopeia(self, agent):
         with patch("agents.schedule_agent.agent.httpx.AsyncClient") as mock_client_cls:
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
@@ -250,7 +250,7 @@ class TestReportResult:
             mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
             await agent._report_result(
-                orchestra_url="http://orchestra:8001",
+                cassiopeia_url="http://cassiopeia:8001",
                 task_id="t-001",
                 status="COMPLETED",
                 result_data={"summary": "ok"},
@@ -259,7 +259,7 @@ class TestReportResult:
 
         mock_http.post.assert_awaited_once()
         call_kwargs = mock_http.post.call_args
-        assert "http://orchestra:8001/results" in call_kwargs[0]
+        assert "http://cassiopeia:8001/results" in call_kwargs[0]
 
     async def test_report_result_sends_to_dlq_after_max_retries(self, agent):
         with patch("agents.schedule_agent.agent.httpx.AsyncClient") as mock_cls:
@@ -273,7 +273,7 @@ class TestReportResult:
 
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 await agent._report_result(
-                    orchestra_url="http://orchestra:8001",
+                    cassiopeia_url="http://cassiopeia:8001",
                     task_id="failed-sched-task",
                     status="FAILED",
                     result_data={},
@@ -283,4 +283,4 @@ class TestReportResult:
 
         mock_redis.rpush.assert_awaited_once()
         dlq_call = mock_redis.rpush.call_args
-        assert "orchestra:dlq" in dlq_call[0]
+        assert "cassiopeia:dlq" in dlq_call[0]

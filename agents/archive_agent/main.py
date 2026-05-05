@@ -5,7 +5,7 @@ MODE 환경변수로 동작 모드를 선택합니다:
     ephemeral (기본): Notion에서 '검토중' 태스크를 가져와 처리 후 자연 종료
                       ephemeral-docker-ops 전략 준수 (cron/스케줄러 실행용)
     server:           FastAPI + Redis 리스너 서버 실행
-                      OrchestraManager로부터 태스크를 수신하여 처리
+                      CassiopeiaManager로부터 태스크를 수신하여 처리
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _run_ephemeral() -> None:
 
 
 def _run_server() -> None:
-    """FastAPI 서버 모드 — OrchestraManager Redis 큐 수신."""
+    """FastAPI 서버 모드 — CassiopeiaManager Redis 큐 수신."""
     import uvicorn
 
     host = os.environ.get("HOST", "0.0.0.0")

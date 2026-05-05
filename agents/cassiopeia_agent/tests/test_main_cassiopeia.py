@@ -1,6 +1,6 @@
 """
 main.py cassiopeia-sdk 마이그레이션 TDD 테스트
-- POST /tasks: cassiopeia.send_message(receiver="orchestra") 사용 검증
+- POST /tasks: cassiopeia.send_message(receiver="cassiopeia") 사용 검증
 - POST /dispatch: cassiopeia.send_message(receiver=agent_name) 사용 검증
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ async def async_client(fake_redis, mock_cassiopeia_client, tmp_path):
     from agents.cassiopeia_agent.main import app
     from agents.cassiopeia_agent import app_context
     from agents.cassiopeia_agent.health_monitor import HealthMonitor
-    from agents.cassiopeia_agent.manager import OrchestraManager
+    from agents.cassiopeia_agent.manager import CassiopeiaManager
     from agents.cassiopeia_agent.state_manager import StateManager
     from agents.cassiopeia_agent.agent_builder_handler import AgentBuilderHandler
     from agents.cassiopeia_agent.registry import AgentRegistry
@@ -82,7 +82,7 @@ async def async_client(fake_redis, mock_cassiopeia_client, tmp_path):
     sm = StateManager(redis_client=fake_redis)
     sm._db_path = db_path
     hm = HealthMonitor(redis_client=fake_redis)
-    mgr = OrchestraManager(
+    mgr = CassiopeiaManager(
         redis_client=fake_redis,
         nlu_engine=nlu,
         state_manager=sm,
@@ -128,7 +128,7 @@ async def async_client(fake_redis, mock_cassiopeia_client, tmp_path):
 
 class TestSubmitTaskCassiopeia:
     async def test_uses_cassiopeia_send_message(self, async_client, mock_cassiopeia_client):
-        """POST /tasks가 cassiopeia.send_message()로 오케스트라에 태스크를 전달한다."""
+        """POST /tasks가 cassiopeia.send_message()로 카시오페아에 태스크를 전달한다."""
         resp = await async_client.post(
             "/tasks",
             json={"user_id": "user-1", "channel_id": "ch-1", "content": "파일 읽어줘"},
@@ -136,14 +136,14 @@ class TestSubmitTaskCassiopeia:
         assert resp.status_code == 200
         mock_cassiopeia_client.send_message.assert_awaited_once()
 
-    async def test_sends_to_orchestra_receiver(self, async_client, mock_cassiopeia_client):
-        """receiver='orchestra'로 전송한다."""
+    async def test_sends_to_cassiopeia_receiver(self, async_client, mock_cassiopeia_client):
+        """receiver='cassiopeia'로 전송한다."""
         await async_client.post(
             "/tasks",
             json={"user_id": "user-1", "channel_id": "ch-1", "content": "테스트"},
         )
         kwargs = mock_cassiopeia_client.send_message.call_args.kwargs
-        assert kwargs["receiver"] == "orchestra"
+        assert kwargs["receiver"] == "cassiopeia"
 
     async def test_action_is_user_request(self, async_client, mock_cassiopeia_client):
         """action='user_request' 로 전송한다."""

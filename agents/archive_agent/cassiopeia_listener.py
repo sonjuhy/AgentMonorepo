@@ -1,8 +1,8 @@
 """
 Archive Agent Cassiopeia 리스너
-- cassiopeia-sdk CassiopeiaClient.listen()으로 orchestra 디스패치 수신 (Redis Pub/Sub)
-- UnifiedArchiveAgent.handle_dispatch()에 위임 후 orchestra /results로 결과 보고
-- agent:archive_agent:health Redis Hash를 15초 주기로 갱신 (OrchestraManager HealthMonitor 연동)
+- cassiopeia-sdk CassiopeiaClient.listen()으로 cassiopeia 디스패치 수신 (Redis Pub/Sub)
+- UnifiedArchiveAgent.handle_dispatch()에 위임 후 cassiopeia /results로 결과 보고
+- agent:archive_agent:health Redis Hash를 15초 주기로 갱신 (CassiopeiaManager HealthMonitor 연동)
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ logger = logging.getLogger("archive_agent.cassiopeia_listener")
 
 _AGENT_NAME = "archive_agent"
 _HEALTH_KEY = f"agent:{_AGENT_NAME}:health"
-_DLQ_KEY = "orchestra:dlq"
+_DLQ_KEY = "cassiopeia:dlq"
 _HEARTBEAT_INTERVAL: int = int(os.environ.get("HEARTBEAT_INTERVAL", "15"))
 _HTTP_REPORT_TIMEOUT: float = float(os.environ.get("HTTP_REPORT_TIMEOUT", "10.0"))
 _HEALTH_TTL: int = _HEARTBEAT_INTERVAL * 4
@@ -48,11 +48,11 @@ _NLU_DESCRIPTION = (
 
 class ArchiveCassiopeiaListener:
     """
-    OrchestraManager ↔ UnifiedArchiveAgent 연결 브리지 (Pub/Sub 기반).
+    CassiopeiaManager ↔ UnifiedArchiveAgent 연결 브리지 (Pub/Sub 기반).
 
     - cassiopeia-sdk listen()으로 agent:archive_agent 채널 구독
     - UnifiedArchiveAgent에게 위임 (스스로 Notion/Obsidian 판단)
-    - HTTP POST {orchestra_url}/results 결과 보고
+    - HTTP POST {cassiopeia_url}/results 결과 보고
     - 15초 주기 heartbeat (agent:archive_agent:health)
     """
 
@@ -60,14 +60,14 @@ class ArchiveCassiopeiaListener:
         self,
         archive_agent: UnifiedArchiveAgent | None = None,
         redis_url: str | None = None,
-        orchestra_url: str | None = None,
+        cassiopeia_url: str | None = None,
     ) -> None:
         self._agent = archive_agent or UnifiedArchiveAgent()
 
         _url = redis_url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
         self._redis_url = _url.replace("localhost", "127.0.0.1")
-        self._orchestra_url = orchestra_url or os.environ.get(
-            "ORCHESTRA_URL", "http://127.0.0.1:8001"
+        self._cassiopeia_url = cassiopeia_url or os.environ.get(
+            "CASSIOPEIA_URL", "http://127.0.0.1:8001"
         )
         self._redis: aioredis.Redis | None = None
         self._cassiopeia: CassiopeiaClient | None = None
@@ -122,7 +122,7 @@ class ArchiveCassiopeiaListener:
         """
         수신한 AgentMessage를 파싱하고 ArchiveAgent에 위임한 뒤 결과를 보고합니다.
 
-        payload 구조 (orchestra manager가 dict(dispatch)로 전송):
+        payload 구조 (cassiopeia manager가 dict(dispatch)로 전송):
             {
                 "task_id": "...",
                 "action": "...",
@@ -194,7 +194,7 @@ class ArchiveCassiopeiaListener:
         payload_summary: str | None = None,
     ) -> None:
         """
-        처리 결과를 OrchestraManager POST /results 엔드포인트로 전송합니다.
+        처리 결과를 CassiopeiaManager POST /results 엔드포인트로 전송합니다.
         네트워크 오류 시 최대 3회 재시도 (1s, 2s, 4s 백오프).
         """
         payload = {
@@ -207,7 +207,7 @@ class ArchiveCassiopeiaListener:
             "error": error,
             "usage_stats": {},
         }
-        url = f"{self._orchestra_url}/results"
+        url = f"{self._cassiopeia_url}/results"
 
         for attempt in range(3):
             try:
@@ -247,7 +247,7 @@ class ArchiveCassiopeiaListener:
     async def _heartbeat_loop(self) -> None:
         """
         15초 주기로 agent:archive_agent:health Redis Hash를 갱신합니다.
-        OrchestraManager HealthMonitor가 이 키를 읽어 가용 여부를 판단합니다.
+        CassiopeiaManager HealthMonitor가 이 키를 읽어 가용 여부를 판단합니다.
         CancelledError를 수신하면 정상 종료합니다.
         """
         logger.info("[ArchiveCassiopeiaListener] heartbeat 시작")
