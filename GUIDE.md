@@ -97,3 +97,106 @@ If you encounter issues, check the agent logs, ensure dependencies are installed
 ## **Next Steps**
 *   Rename the CI/CD workflow file.
 *   Update paths within the CI/CD workflow file.
+
+---
+<br>
+
+# 가이드 (Korean)
+
+이 프로젝트는 여러 에이전트가 협력하여 복잡한 작업을 수행하는 멀티 에이전트 시스템을 구현합니다.
+
+## 에이전트 목록
+
+프로젝트는 각기 특정 역할을 담당하는 여러 에이전트로 구성됩니다:
+
+*   **Cassiopeia Agent (`agents/cassiopeia_agent/`):** 다른 에이전트들 간의 태스크 분배, 계획 수립, 커뮤니케이션을 관리하는 중앙 오케스트레이터입니다. 사용자 요청의 기본 진입점 역할을 합니다.
+*   **Research Agent (`agents/research_agent/`):** 리서치 수행 및 정보 수집을 담당합니다.
+*   **File Agent (`agents/file_agent/`):** 파일 읽기, 쓰기 및 관리 등 파일 관련 작업을 처리합니다.
+*   **Communication Agent (`agents/communication_agent/`):** Slack, Discord, Telegram 등 외부 플랫폼과의 통신을 관리합니다.
+*   **Sandbox Agent (`agents/sandbox_agent/`):** 코드를 안전하게 실행할 수 있는 격리된 샌드박스 환경을 제공합니다.
+*   **Schedule Agent (`agents/schedule_agent/`):** 일정 관리 및 태스크 우선순위 지정을 담당합니다.
+
+## 공통 라이브러리 (Core Libraries)
+
+*   **Shared Core (`shared_core/`):** 로깅, LLM 인터페이스, 메시징, 저장소, 인증 등 모든 에이전트가 공통으로 사용하는 유틸리티와 라이브러리를 포함합니다.
+
+## 에이전트 실행
+
+### 카시오페아 에이전트 (Cassiopeia Agent)
+
+카시오페아 에이전트는 FastAPI 애플리케이션으로 실행할 수 있습니다.
+
+**개발 모드 (로컬 LLM):**
+```bash
+python agents/cassiopeia_agent/main.py --llm local
+```
+
+**운영 모드 (외부 LLMs):**
+```bash
+LLM_BACKEND=chatgpt python agents/cassiopeia_agent/main.py
+LLM_BACKEND=claude python agents/cassiopeia_agent/main.py
+```
+
+**모듈로 실행:**
+```bash
+python -m agents.cassiopeia_agent.main
+```
+
+### 다른 에이전트들
+
+개별 에이전트를 실행하는 방법은 각 에이전트의 README나 문서를 참조하세요. 예시 (리서치 에이전트 실행):
+
+```bash
+python agents/research_agent/main.py
+```
+
+## 설정 마법사 (Setup Wizard)
+
+환경 구성을 돕기 위해 설정 마법사를 실행할 수 있습니다:
+
+```bash
+python tools/setup_wizard.py
+```
+
+## 개발 워크플로우
+
+1.  **코드 구조:** 에이전트들은 `agents/` 디렉토리에, 공통 라이브러리는 `shared_core/`에 위치합니다.
+2.  **의존성 관리:** 의존성 관리 도구로 Poetry를 사용합니다. 각 에이전트 디렉토리, 또는 루트에 poetry.lock이 있다면 루트에서 `poetry install`을 실행하세요.
+3.  **테스트:** 테스트 코드는 각 에이전트의 `tests/` 하위 디렉토리에 있습니다. `pytest`로 테스트를 실행하세요. 예시 (카시오페아 에이전트 테스트):
+    ```bash
+    pytest agents/cassiopeia_agent/tests/
+    ```
+4.  **코드 스타일:** 파이썬 표준 스타일 가이드(PEP 8)를 준수합니다. 프로젝트 내에 Linter와 Formatter가 구성되어 있습니다.
+
+## 기여하기
+
+프로젝트 기여에 대한 자세한 내용은 `CONTRIBUTING.md`를 참조하세요.
+
+## 라이선스
+
+이 프로젝트는 Apache 2.0 라이선스가 적용됩니다.
+
+## 참고 사항
+
+*   메시지 브로커링을 위해 Redis 서버가 실행 중이어야 합니다.
+*   환경 변수를 사용하여 시스템 설정을 관리할 수 있습니다.
+*   여러 에이전트를 쉽게 관리하고 개발하기 위해 모노리포(monorepo) 구조로 설계되었습니다.
+
+## 문제 해결 (Troubleshooting)
+
+문제가 발생하면 에이전트 로그를 확인하고, 의존성 라이브러리가 올바르게 설치되었는지, Redis와 같은 필수 서비스가 정상적으로 실행 중인지 확인하세요.
+
+---
+## **이전 수정 사항**
+*   `agents/cassiopeia_agent` 디렉토리명을 현재의 이름으로 변경했습니다.
+*   새로운 디렉토리 이름과 모듈 경로를 반영하여 `agents/cassiopeia_agent/` 내부의 Dockerfile과 `main.py`를 업데이트했습니다.
+*   로거 이름 및 내부 참조 경로를 일치되게 업데이트했습니다.
+*   `agents/cassiopeia_agent/main.py`의 FastAPI 앱 제목 및 설명을 수정했습니다.
+*   에이전트 이름 및 경로 변경 사항을 반영하여 `agents/cassiopeia_agent/OVERVIEW.md`를 수정했습니다.
+*   새로운 모듈 경로를 사용하도록 Dockerfile들의 예시 명령어를 업데이트했습니다.
+*   `state_manager.py`의 역할 확인 조건("cassiopeia")을 업데이트했습니다.
+*   새로운 에이전트 이름으로 `README.md`를 업데이트했습니다.
+
+## **다음 단계**
+*   CI/CD 워크플로우 파일 이름 변경.
+*   CI/CD 워크플로우 내 경로 업데이트.
