@@ -37,6 +37,10 @@ if [ "$LANG" = "2" ]; then
   L_R_CASS="  REDIS_CASSIOPEIA_PASSWORD: "
   L_R_COMM="  REDIS_COMMUNITY_PASSWORD: "
   L_ENV_DONE=".env 파일이 생성되었습니다."
+  L_MISSING_KEYS="다음 필수 키가 .env에 없거나 비어 있습니다:"
+  L_FILL_MISSING="값을 입력하세요 (자동 생성 항목은 Enter로 건너뜁니다):"
+  L_MISSING_AUTO="Enter 입력 시 자동 생성"
+  L_ENV_UPDATED=".env 파일이 업데이트되었습니다."
   L_RUN="실행 방식을 선택하세요:"
   L_RUN1="  1) Python  (개발 환경)"
   L_RUN2="  2) Docker  (운영 권장)"
@@ -69,6 +73,10 @@ else
   L_R_CASS="  REDIS_CASSIOPEIA_PASSWORD: "
   L_R_COMM="  REDIS_COMMUNITY_PASSWORD: "
   L_ENV_DONE=".env file created."
+  L_MISSING_KEYS="Missing required keys detected in .env:"
+  L_FILL_MISSING="Enter values below (press Enter to auto-generate where applicable):"
+  L_MISSING_AUTO="Enter to auto-generate"
+  L_ENV_UPDATED=".env updated with missing keys."
   L_RUN="How would you like to run Cassiopeia?"
   L_RUN1="  1) Python  (development)"
   L_RUN2="  2) Docker  (recommended for production)"
@@ -84,10 +92,87 @@ fi
 gen_hex() { python3 -c "import secrets; print(secrets.token_hex($1))"; }
 gen_b64() { python3 -c "import secrets,base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"; }
 
+# Update or append a key=value pair in .env
+_upsert_env() {
+  local k="$1" v="$2"
+  python3 -c "
+import re, sys
+k = sys.argv[1]; v = sys.argv[2]
+with open('.env') as f: txt = f.read()
+pat = re.compile(r'^' + re.escape(k) + r'=.*', re.M)
+if pat.search(txt):
+    txt = pat.sub(lambda m: k + '=' + v, txt)
+else:
+    txt = txt.rstrip('\n') + '\n' + k + '=' + v + '\n'
+with open('.env', 'w') as f: f.write(txt)
+" "$k" "$v"
+}
+
 # ── 2. .env ───────────────────────────────────────────────────────────────────
 echo ""
 if [ -f ".env" ]; then
   echo "[1/3] $L_ENV_OK"
+
+  # Load existing values into current shell
+  set -a; source .env 2>/dev/null; set +a
+
+  # Detect missing or empty required keys
+  _MISSING=()
+  case "${LLM_BACKEND:-gemini}" in
+    gemini) [ -z "${GEMINI_API_KEY:-}" ]    && _MISSING+=(GEMINI_API_KEY) ;;
+    claude) [ -z "${ANTHROPIC_API_KEY:-}" ] && _MISSING+=(ANTHROPIC_API_KEY) ;;
+  esac
+  [ -z "${ADMIN_API_KEY:-}" ]             && _MISSING+=(ADMIN_API_KEY)
+  [ -z "${CLIENT_API_KEY:-}" ]            && _MISSING+=(CLIENT_API_KEY)
+  [ -z "${ENCRYPTION_KEY:-}" ]            && _MISSING+=(ENCRYPTION_KEY)
+  [ -z "${REDIS_CASSIOPEIA_PASSWORD:-}" ] && _MISSING+=(REDIS_CASSIOPEIA_PASSWORD)
+  [ -z "${REDIS_COMMUNITY_PASSWORD:-}" ]  && _MISSING+=(REDIS_COMMUNITY_PASSWORD)
+  [ -z "${DISPATCH_HMAC_SECRET:-}" ]      && _MISSING+=(DISPATCH_HMAC_SECRET)
+  [ -z "${SANDBOX_API_KEY:-}" ]           && _MISSING+=(SANDBOX_API_KEY)
+
+  if [ ${#_MISSING[@]} -gt 0 ]; then
+    echo ""
+    echo "$L_MISSING_KEYS"
+    for _k in "${_MISSING[@]}"; do echo "  - $_k"; done
+    echo ""
+    echo "$L_FILL_MISSING"
+    echo ""
+
+    for _k in "${_MISSING[@]}"; do
+      case "$_k" in
+        GEMINI_API_KEY)
+          read -rp "  GEMINI_API_KEY: " _v
+          _upsert_env "$_k" "$_v" ;;
+        ANTHROPIC_API_KEY)
+          read -rp "  ANTHROPIC_API_KEY: " _v
+          _upsert_env "$_k" "$_v" ;;
+        ADMIN_API_KEY)
+          read -rp "  ADMIN_API_KEY [$L_MISSING_AUTO]: " _v
+          _upsert_env "$_k" "${_v:-$(gen_hex 32)}" ;;
+        CLIENT_API_KEY)
+          read -rp "  CLIENT_API_KEY [$L_MISSING_AUTO]: " _v
+          _upsert_env "$_k" "${_v:-$(gen_hex 32)}" ;;
+        ENCRYPTION_KEY)
+          read -rp "  ENCRYPTION_KEY [$L_MISSING_AUTO]: " _v
+          _upsert_env "$_k" "${_v:-$(gen_b64)}" ;;
+        REDIS_CASSIOPEIA_PASSWORD)
+          read -rp "  REDIS_CASSIOPEIA_PASSWORD [$L_MISSING_AUTO]: " _v
+          _upsert_env "$_k" "${_v:-$(gen_hex 16)}" ;;
+        REDIS_COMMUNITY_PASSWORD)
+          read -rp "  REDIS_COMMUNITY_PASSWORD [$L_MISSING_AUTO]: " _v
+          _upsert_env "$_k" "${_v:-$(gen_hex 16)}" ;;
+        DISPATCH_HMAC_SECRET)
+          read -rp "  DISPATCH_HMAC_SECRET [$L_MISSING_AUTO]: " _v
+          _upsert_env "$_k" "${_v:-$(gen_hex 32)}" ;;
+        SANDBOX_API_KEY)
+          _upsert_env "$_k" "$(gen_hex 32)"
+          echo "  SANDBOX_API_KEY: ($L_MISSING_AUTO)" ;;
+      esac
+    done
+
+    echo ""
+    echo "[1/3] $L_ENV_UPDATED"
+  fi
 else
   echo "[1/3] $L_ENV_SETUP"
   echo ""

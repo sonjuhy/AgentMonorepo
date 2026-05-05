@@ -84,10 +84,15 @@ services:
       - CB_THRESHOLD=${CB_THRESHOLD:-3}
       - CB_WINDOW_SEC=${CB_WINDOW_SEC:-300}
       - HEARTBEAT_VALID_SEC=${HEARTBEAT_VALID_SEC:-30}
+      - RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN:-20}
+      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
+      - USER_TIMEZONE=${USER_TIMEZONE:-Asia/Seoul}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       # API 인증 키 (필수 — 미설정 시 서비스 시작 불가)
       - ADMIN_API_KEY=${ADMIN_API_KEY}
       - CLIENT_API_KEY=${CLIENT_API_KEY}
+      # 암호화 키 (필수 — 미설정 시 서비스 시작 불가)
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       # dispatch 메시지 HMAC 서명 키 (권장 — 미설정 시 서명 생략)
       - DISPATCH_HMAC_SECRET=${DISPATCH_HMAC_SECRET}
       # Redis 비밀번호 (필수 — cassiopeia 계정용)

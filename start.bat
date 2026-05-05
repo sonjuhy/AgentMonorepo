@@ -133,7 +133,7 @@ set /p REDIS_COMMUNITY_PASSWORD="!L_R_COMM! "
 if "!ADMIN_API_KEY!"==""             for /f %%i in ('powershell -c "[System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()"') do set ADMIN_API_KEY=%%i
 if "!CLIENT_API_KEY!"==""            for /f %%i in ('powershell -c "[System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()"') do set CLIENT_API_KEY=%%i
 if "!DISPATCH_HMAC_SECRET!"==""      for /f %%i in ('powershell -c "[System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()"') do set DISPATCH_HMAC_SECRET=%%i
-if "!ENCRYPTION_KEY!"==""            for /f %%i in ('powershell -c "[Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('+','-').Replace('/','_').TrimEnd('=')"') do set ENCRYPTION_KEY=%%i
+if "!ENCRYPTION_KEY!"==""            for /f %%i in ('powershell -c "[Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('+','-').Replace('/','_')"') do set ENCRYPTION_KEY=%%i
 if "!REDIS_CASSIOPEIA_PASSWORD!"=="" for /f %%i in ('powershell -c "[System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLower()"') do set REDIS_CASSIOPEIA_PASSWORD=%%i
 if "!REDIS_COMMUNITY_PASSWORD!"==""  for /f %%i in ('powershell -c "[System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLower()"') do set REDIS_COMMUNITY_PASSWORD=%%i
 for /f %%i in ('powershell -c "[System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()"') do set SANDBOX_API_KEY=%%i
