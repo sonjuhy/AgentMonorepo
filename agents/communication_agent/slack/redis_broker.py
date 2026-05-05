@@ -1,10 +1,8 @@
 """
 Redis 메시지 브로커 클라이언트
 - 세션 상태·승인 피드백·헬스체크 전용
-- Discord/Telegram은 아직 cassiopeia Pub/Sub 미전환 — blpop_comm_task 잔존
-
-참고: Slack 오케스트라 ↔ 소통 에이전트 간 태스크 통신은
-      cassiopeia-sdk (Redis Pub/Sub)를 통해 SlackCommAgent가 직접 처리합니다.
+- 태스크 통신(inbound/outbound)은 모든 플랫폼(Slack/Discord/Telegram)이
+  cassiopeia-sdk (Redis Pub/Sub)를 통해 직접 처리합니다.
 """
 
 import json
@@ -16,17 +14,6 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger("slack_agent.redis_broker")
 
-# Discord/Telegram 아웃바운드 큐 (아직 Pub/Sub 미전환)
-COMM_TASKS_KEY = "agent:communication:tasks"
-DISCORD_COMM_TASKS_KEY = "agent:communication:discord:tasks"
-TELEGRAM_COMM_TASKS_KEY = "agent:communication:telegram:tasks"
-
-PLATFORM_COMM_QUEUE: dict[str, str] = {
-    "slack": COMM_TASKS_KEY,
-    "discord": DISCORD_COMM_TASKS_KEY,
-    "telegram": TELEGRAM_COMM_TASKS_KEY,
-}
-
 # 승인 피드백은 태스크별 큐를 사용 (오케스트라와 일치)
 _APPROVAL_KEY_PREFIX = "orchestra:approval:"
 
@@ -36,7 +23,7 @@ _SESSION_TTL = 7200
 
 class RedisBroker:
     """
-    소통 에이전트의 Redis 클라이언트 (세션 상태·승인 피드백 전용).
+    소통 에이전트의 Redis 클라이언트 (세션 상태·승인 피드백·헬스체크 전용).
 
     환경 변수:
         REDIS_URL: Redis 접속 URL (기본값: redis://localhost:6379)
@@ -74,54 +61,10 @@ class RedisBroker:
         await self._client.rpush(key, json.dumps(feedback, ensure_ascii=False))
         logger.debug("[RedisBroker] push_approval key=%s action=%s", key, feedback.get("action"))
 
-    async def push_to_orchestra(
-        self,
-        user_id: str,
-        channel_id: str,
-        content: str,
-        thread_ts: str | None = None,
-        source: str = "slack",
-    ) -> str:
-        """Discord/Telegram용 오케스트라 큐 직접 삽입 (Pub/Sub 전환 전까지 잔존).
-        Slack은 SlackCommAgent가 cassiopeia.send_message()로 직접 처리합니다.
-        """
-        import uuid as _uuid
-        from shared_core.dispatch_auth import sign_task as _sign_task
-        task_id = str(_uuid.uuid4())
-        session_id = f"{user_id}:{channel_id}"
-        task: dict[str, Any] = {
-            "task_id": task_id,
-            "session_id": session_id,
-            "requester": {"user_id": user_id, "channel_id": channel_id},
-            "content": content,
-            "source": source,
-            "thread_ts": thread_ts,
-        }
-        await self._client.rpush("agent:orchestra:tasks", json.dumps(_sign_task(task), ensure_ascii=False))
-        logger.debug("[RedisBroker] push_to_orchestra task_id=%s source=%s", task_id, source)
-        return task_id
-
-    async def blpop_comm_task(self, timeout: float = 5.0, queue_key: str | None = None) -> dict[str, Any] | None:
-        """Discord/Telegram 아웃바운드 큐에서 결과를 수신합니다 (Pub/Sub 전환 전까지 잔존)."""
-        key = queue_key or COMM_TASKS_KEY
-        result = await self._client.blpop(key, timeout=timeout)
-        if result is None:
-            return None
-        _, value = result
-        return json.loads(value)
-
     # ── 세션 스레드 관리 ───────────────────────────────────────────────────────
 
     async def get_thread_ts(self, session_id: str) -> str | None:
-        """
-        세션에 연결된 Slack 스레드 루트 ts를 조회합니다.
-
-        Args:
-            session_id (str): 세션 식별자 (보통 task_id 또는 user_id+channel_id 조합).
-
-        Returns:
-            str | None: 저장된 thread_ts, 없으면 None.
-        """
+        """세션에 연결된 Slack 스레드 루트 ts를 조회합니다."""
         return await self._client.get(f"slack:session:{session_id}:thread_ts")
 
     async def save_thread_ts(self, session_id: str, thread_ts: str) -> None:
@@ -139,14 +82,7 @@ class RedisBroker:
     # ── 태스크 컨텍스트 ────────────────────────────────────────────────────────
 
     async def save_task_context(self, task_id: str, context: dict[str, Any]) -> None:
-        """
-        태스크 컨텍스트(채널 ID, 스레드 ts 등)를 저장합니다.
-        승인 버튼 클릭 시 채널/스레드 정보를 복원하는 데 사용합니다.
-
-        Args:
-            task_id (str): 태스크 식별자.
-            context (dict): 저장할 컨텍스트 딕셔너리.
-        """
+        """태스크 컨텍스트(채널 ID, 스레드 ts 등)를 저장합니다."""
         await self._client.setex(
             f"slack:task:{task_id}:context",
             _SESSION_TTL,
@@ -154,15 +90,7 @@ class RedisBroker:
         )
 
     async def get_task_context(self, task_id: str) -> dict[str, Any] | None:
-        """
-        저장된 태스크 컨텍스트를 조회합니다.
-
-        Args:
-            task_id (str): 태스크 식별자.
-
-        Returns:
-            dict | None: 컨텍스트 딕셔너리, 없으면 None.
-        """
+        """저장된 태스크 컨텍스트를 조회합니다."""
         data = await self._client.get(f"slack:task:{task_id}:context")
         return json.loads(data) if data else None
 
@@ -177,13 +105,7 @@ class RedisBroker:
             return False
 
     async def update_agent_health(self, agent_name: str, fields: dict[str, str]) -> None:
-        """
-        agent:{agent_name}:health Hash를 갱신합니다 (하트비트 전송용).
-
-        Args:
-            agent_name: 에이전트 이름 (예: "communication_agent")
-            fields: 저장할 헬스 필드 딕셔너리
-        """
+        """agent:{agent_name}:health Hash를 갱신합니다 (하트비트 전송용)."""
         key = f"agent:{agent_name}:health"
         await self._client.hset(key, mapping=fields)
         await self._client.expire(key, 60)

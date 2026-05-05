@@ -1,8 +1,8 @@
 """
 Discord 소통 에이전트 (DiscordCommAgent)
-- Discord API와 Redis 사이의 양방향 게이트웨이
-- Inbound:  Discord 메시지 → on_user_message → Redis agent:orchestra:tasks
-- Outbound: Redis agent:communication:discord:tasks → listen_system_results → Discord
+- Discord API와 cassiopeia Pub/Sub 사이의 양방향 게이트웨이
+- Inbound:  Discord 메시지 → on_user_message → cassiopeia Pub/Sub agent:orchestra
+- Outbound: cassiopeia Pub/Sub agent:discord_communication_agent → listen_system_results → Discord
 - Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis orchestra:approval:{task_id}
 """
 
@@ -11,14 +11,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from typing import Any
 
 import discord
 import discord.ui
+from cassiopeia_sdk.client import CassiopeiaClient
 
 from ..models import DiscordEvent
-from ..slack.redis_broker import DISCORD_COMM_TASKS_KEY, RedisBroker
+from ..slack.redis_broker import RedisBroker
 from .formatter import DiscordFormatter
+from shared_core.dispatch_auth import sign_task
 
 logger = logging.getLogger("discord_agent.agent")
 
@@ -111,13 +114,25 @@ class DiscordCommAgent:
         self,
         client: discord.Client | None = None,
         redis: RedisBroker | None = None,
+        cassiopeia: CassiopeiaClient | None = None,
     ) -> None:
         self._redis = redis
         self._client = client
+        self._cassiopeia: CassiopeiaClient | None = cassiopeia
+        self._cassiopeia_connected: bool = cassiopeia is not None
         self._heartbeat_task: asyncio.Task[None] | None = None
 
     def set_client(self, client: discord.Client) -> None:
         self._client = client
+
+    async def _ensure_cassiopeia(self) -> CassiopeiaClient:
+        if self._cassiopeia is None:
+            redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379").replace("localhost", "127.0.0.1")
+            self._cassiopeia = CassiopeiaClient(agent_id=self.agent_name, redis_url=redis_url)
+        if not self._cassiopeia_connected:
+            await self._cassiopeia.connect()
+            self._cassiopeia_connected = True
+        return self._cassiopeia
 
     # ── 권한 확인 ──────────────────────────────────────────────────────────────
 
@@ -149,12 +164,21 @@ class DiscordCommAgent:
         # 접수 확인 메시지 전송 (원본 메시지에 reply)
         await message.reply("⏳ 요청을 접수했습니다. 처리 중입니다...")
 
-        task_id = await self._redis.push_to_orchestra(
-            user_id=user_id,
-            channel_id=channel_id,
-            content=event["text"],
-            thread_ts=message_id,
-            source="discord",
+        task_id = str(uuid.uuid4())
+        session_id = f"{user_id}:{channel_id}"
+        task = {
+            "task_id": task_id,
+            "session_id": session_id,
+            "requester": {"user_id": user_id, "channel_id": channel_id},
+            "content": event["text"],
+            "source": "discord",
+            "thread_ts": message_id,
+        }
+        cassiopeia = await self._ensure_cassiopeia()
+        await cassiopeia.send_message(
+            action="user_request",
+            payload=sign_task(task),
+            receiver="orchestra",
         )
 
         await self._redis.save_task_context(task_id, {
@@ -173,28 +197,21 @@ class DiscordCommAgent:
     # ── Outbound: 시스템 결과 수신 루프 ───────────────────────────────────────
 
     async def listen_system_results(self) -> None:
-        """Redis agent:communication:discord:tasks 큐를 모니터링합니다."""
-        if self._redis is None:
-            logger.warning("[DiscordAgent] Redis 미설정 — listen_system_results 종료")
-            return
-
+        """cassiopeia Pub/Sub agent:discord_communication_agent 채널을 모니터링합니다."""
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(), name="discord_agent_heartbeat"
         )
 
-        logger.info("[DiscordAgent] Redis 결과 리스너 시작 (queue=%s)", DISCORD_COMM_TASKS_KEY)
-        while True:
-            try:
-                result = await self._redis.blpop_comm_task(
-                    timeout=5.0, queue_key=DISCORD_COMM_TASKS_KEY
-                )
-                if result:
-                    await self._handle_system_result(result)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.error("[DiscordAgent] 결과 처리 오류: %s", exc)
-                await asyncio.sleep(1)
+        cassiopeia = await self._ensure_cassiopeia()
+        logger.info("[DiscordAgent] cassiopeia 결과 리스너 시작 (channel: agent:%s)", self.agent_name)
+        try:
+            async for msg in cassiopeia.listen():
+                try:
+                    await self._handle_system_result(dict(msg.payload))
+                except Exception as exc:
+                    logger.error("[DiscordAgent] 결과 처리 오류: %s", exc)
+        except asyncio.CancelledError:
+            logger.info("[DiscordAgent] listen_system_results 정상 종료")
 
     async def _heartbeat_loop(self) -> None:
         from datetime import datetime, timezone
