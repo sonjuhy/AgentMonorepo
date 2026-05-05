@@ -15,10 +15,14 @@ cd Cassiopeia
 cp .env.example .env
 # Open .env and fill in ADMIN_API_KEY, CLIENT_API_KEY, and other required values
 
-# 3. Install dependencies
+# 3. Start Redis (required)
+docker-compose up -d redis
+# Or if Redis is installed locally: redis-server
+
+# 4. Install dependencies
 pip install -r agents/cassiopeia_agent/requirements.txt
 
-# 4. Run Cassiopeia agent in development mode (local LLM)
+# 5. Run Cassiopeia agent in development mode (local LLM)
 # shared_core is resolved from the project root — run from there
 python -m agents.cassiopeia_agent.main --llm local
 ```
@@ -66,6 +70,11 @@ The cassiopeia agent can be run as a FastAPI application.
 
 > **Note:** Always run commands from the **project root** (`Cassiopeia/`).
 > `shared_core` is a root-level package and must be on the Python path.
+
+> **Prerequisite:** Redis must be running before starting the agent.
+> ```bash
+> docker-compose up -d redis   # or: redis-server
+> ```
 
 **Development Mode (local LLM):**
 ```bash
@@ -207,10 +216,14 @@ cd Cassiopeia
 cp .env.example .env
 # .env 파일을 열어 ADMIN_API_KEY, CLIENT_API_KEY 등 필수 값을 입력하세요
 
-# 3. 필수 패키지 설치
+# 3. Redis 실행 (필수)
+docker-compose up -d redis
+# 또는 로컬에 Redis가 설치된 경우: redis-server
+
+# 4. 필수 패키지 설치
 pip install -r agents/cassiopeia_agent/requirements.txt
 
-# 4. 개발 모드(로컬 LLM)로 카시오페아 에이전트 바로 실행
+# 5. 개발 모드(로컬 LLM)로 카시오페아 에이전트 바로 실행
 # shared_core는 프로젝트 루트 기준으로 탐색되므로 루트에서 실행하세요
 python -m agents.cassiopeia_agent.main --llm local
 ```
@@ -258,6 +271,11 @@ docker-compose up -d redis cassiopeia_agent
 
 > **주의:** 반드시 **프로젝트 루트**(`Cassiopeia/`)에서 실행하세요.
 > `shared_core`는 루트 레벨 패키지로, Python path에 포함되어야 합니다.
+
+> **사전 조건:** 에이전트 시작 전 Redis가 실행 중이어야 합니다.
+> ```bash
+> docker-compose up -d redis   # 또는: redis-server
+> ```
 
 **개발 모드 (로컬 LLM):**
 ```bash

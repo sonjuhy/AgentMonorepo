@@ -69,29 +69,97 @@ from pydantic import BaseModel, Field
 load_dotenv(encoding="utf-8", override=True)
 
 
+_MSG = {
+    "en": {
+        "lang_prompt":    "Select language / 언어를 선택하세요  [1] English  [2] 한국어 : ",
+        "env_header":     " Cassiopeia — Required environment variables are not set.",
+        "env_missing":    " Missing: {}",
+        "env_choose":     "\nHow would you like to configure?",
+        "env_opt1":       "  1) Run setup wizard (auto-generate .env)",
+        "env_opt2":       "  2) Edit .env manually and re-run",
+        "env_select":     "Select [1/2]: ",
+        "env_still_miss": "\n[Error] Still missing: {}",
+        "env_loaded":     "\nEnvironment variables loaded. Starting server...\n",
+        "env_manual":     "\nEdit .env and re-run.",
+        "env_manual_tip": "  Tip: copy .env.example to .env and fill in the values.",
+        "env_invalid":    "  Please enter 1 or 2.",
+        "redis_header":   " Cannot connect to Redis. ({}:{})",
+        "redis_desc":     " Cassiopeia requires Redis to be running.",
+        "redis_guide":    "\nHow to start Redis:",
+        "redis_opt1":     "  1) Docker : docker-compose up -d redis",
+        "redis_opt2":     "  2) Local  : redis-server",
+        "redis_opt3":     "  3) Exit and start Redis manually",
+        "redis_prompt":   "Have you started Redis? Continue? (y/N): ",
+        "redis_retry":    "Checking Redis connection...",
+        "redis_ok":       "Redis connected. Starting server...\n",
+        "redis_fail":     "[Error] Still cannot connect to Redis. ({}:{})\nPlease verify Redis is running and try again.\n",
+        "redis_exit":     "\nPlease start Redis and re-run.",
+    },
+    "ko": {
+        "lang_prompt":    "Select language / 언어를 선택하세요  [1] English  [2] 한국어 : ",
+        "env_header":     " Cassiopeia — 필수 환경변수가 설정되지 않았습니다.",
+        "env_missing":    " 누락된 항목: {}",
+        "env_choose":     "\n설정 방법을 선택하세요:",
+        "env_opt1":       "  1) 설정 마법사 실행 (자동으로 .env 생성)",
+        "env_opt2":       "  2) 직접 .env 수정 후 재실행",
+        "env_select":     "선택 [1/2]: ",
+        "env_still_miss": "\n[오류] 아직 누락된 항목이 있습니다: {}",
+        "env_loaded":     "\n환경변수가 로드되었습니다. 서버를 시작합니다...\n",
+        "env_manual":     "\n.env 파일을 수정한 뒤 다시 실행하세요.",
+        "env_manual_tip": "  참고: .env.example 을 .env 로 복사한 뒤 편집하세요.",
+        "env_invalid":    "  1 또는 2를 입력하세요.",
+        "redis_header":   " Redis에 연결할 수 없습니다. ({}:{})",
+        "redis_desc":     " Cassiopeia는 Redis가 실행 중이어야 시작할 수 있습니다.",
+        "redis_guide":    "\nRedis 실행 방법:",
+        "redis_opt1":     "  1) Docker로 실행  : docker-compose up -d redis",
+        "redis_opt2":     "  2) 직접 설치된 경우: redis-server",
+        "redis_opt3":     "  3) 종료 후 직접 시작",
+        "redis_prompt":   "Redis를 실행한 뒤 계속하시겠습니까? (y/N): ",
+        "redis_retry":    "Redis 연결을 다시 확인합니다...",
+        "redis_ok":       "Redis 연결 확인됐습니다. 서버를 시작합니다...\n",
+        "redis_fail":     "[오류] 아직 Redis에 연결할 수 없습니다. ({}:{})\nRedis가 실행 중인지 확인한 뒤 다시 시도하세요.\n",
+        "redis_exit":     "\nRedis를 실행한 뒤 다시 시도하세요.",
+    },
+}
+
+
+def _select_language() -> dict:
+    """언어 선택 후 메시지 딕셔너리를 반환한다."""
+    while True:
+        choice = input(_MSG["en"]["lang_prompt"]).strip()
+        if choice == "1":
+            return _MSG["en"]
+        elif choice == "2":
+            return _MSG["ko"]
+        # 입력 없이 엔터 → 기본값 영어
+        elif choice == "":
+            return _MSG["en"]
+
+
 def _check_env_or_setup() -> None:
-    """필수 환경변수가 없으면 설정 방법을 선택하게 한다."""
+    """필수 환경변수가 없으면 언어 선택 후 설정 방법을 안내한다."""
+    import sys
     required = ["ADMIN_API_KEY", "CLIENT_API_KEY"]
     missing = [k for k in required if not os.environ.get(k)]
     if not missing:
         return
 
+    msg = _select_language()
     print("=" * 60)
-    print(" Cassiopeia — 필수 환경변수가 설정되지 않았습니다.")
-    print(f" 누락된 항목: {', '.join(missing)}")
+    print(msg["env_header"])
+    print(msg["env_missing"].format(", ".join(missing)))
     print("=" * 60)
-    print("\n설정 방법을 선택하세요:")
-    print("  1) 설정 마법사 실행 (자동으로 .env 생성)")
-    print("  2) 직접 .env 수정 후 재실행")
+    print(msg["env_choose"])
+    print(msg["env_opt1"])
+    print(msg["env_opt2"])
     print()
 
     while True:
-        choice = input("선택 [1/2]: ").strip()
+        choice = input(msg["env_select"]).strip()
         if choice == "1":
-            import sys
             from pathlib import Path
-            wizard_path = Path(__file__).resolve().parents[2] / "tools" / "setup_wizard.py"
             import importlib.util
+            wizard_path = Path(__file__).resolve().parents[2] / "tools" / "setup_wizard.py"
             spec = importlib.util.spec_from_file_location("setup_wizard", wizard_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
@@ -99,20 +167,67 @@ def _check_env_or_setup() -> None:
             load_dotenv(encoding="utf-8", override=True)
             still_missing = [k for k in required if not os.environ.get(k)]
             if still_missing:
-                print(f"\n[오류] 아직 누락된 항목이 있습니다: {', '.join(still_missing)}")
+                print(msg["env_still_miss"].format(", ".join(still_missing)))
                 sys.exit(1)
-            print("\n환경변수가 로드되었습니다. 서버를 시작합니다...\n")
+            print(msg["env_loaded"])
             return
         elif choice == "2":
-            print("\n.env 파일을 수정한 뒤 다시 실행하세요.")
-            print("  참고: .env.example 을 .env 로 복사한 뒤 편집하세요.")
-            import sys
+            print(msg["env_manual"])
+            print(msg["env_manual_tip"])
             sys.exit(0)
         else:
-            print("  1 또는 2를 입력하세요.")
+            print(msg["env_invalid"])
 
 
 _check_env_or_setup()
+
+
+def _check_redis_or_guide() -> None:
+    """Redis 미실행 시 언어 선택 후 실행 방법을 안내하고 사용자 확인을 받는다."""
+    import sys
+    import socket as _socket
+    from urllib.parse import urlparse as _urlparse
+
+    redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+    parsed = _urlparse(redis_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 6379
+
+    try:
+        conn = _socket.create_connection((host, port), timeout=2)
+        conn.close()
+        return
+    except OSError:
+        pass
+
+    msg = _select_language()
+    print("=" * 60)
+    print(msg["redis_header"].format(host, port))
+    print(msg["redis_desc"])
+    print("=" * 60)
+    print(msg["redis_guide"])
+    print(msg["redis_opt1"])
+    print(msg["redis_opt2"])
+    print(msg["redis_opt3"])
+    print()
+
+    while True:
+        choice = input(msg["redis_prompt"]).strip().lower()
+        if choice == "y":
+            print(msg["redis_retry"])
+            try:
+                conn = _socket.create_connection((host, port), timeout=3)
+                conn.close()
+                print(msg["redis_ok"])
+                return
+            except OSError:
+                print(msg["redis_fail"].format(host, port))
+        else:
+            print(msg["redis_exit"])
+            sys.exit(0)
+
+
+_check_redis_or_guide()
 
 
 def _validate_callback_url(url: str) -> None:

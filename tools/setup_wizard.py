@@ -23,6 +23,14 @@ class SetupWizard:
         
         print("\n==========================================================")
         print(f" ✓ 설정이 완료되었습니다! {self.env_path} 파일이 생성되었습니다.")
+        print(" ✓ Setup complete! .env file has been generated.")
+        print("==========================================================")
+        print("\n [다음 단계 / Next Step]")
+        print("  Redis가 실행 중이어야 서버를 시작할 수 있습니다.")
+        print("  Redis must be running before starting the server.")
+        print()
+        print("  Docker : docker-compose up -d redis")
+        print("  Local  : redis-server")
         print("==========================================================")
 
     def ask_llm_backend(self):
