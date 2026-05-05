@@ -18,13 +18,13 @@ CLIENT_API_KEY: str = os.environ.get("CLIENT_API_KEY", "")
 if not ADMIN_API_KEY:
     raise RuntimeError(
         "ADMIN_API_KEY 환경변수가 설정되지 않았습니다. "
-        "python -m agents.cassiopeia_agent.main 을 실행하면 설정 마법사를 사용할 수 있습니다."
+        "start.sh 또는 start.bat 을 실행해 .env 파일을 생성하세요."
     )
 
 if not CLIENT_API_KEY:
     raise RuntimeError(
         "CLIENT_API_KEY 환경변수가 설정되지 않았습니다. "
-        "python -m agents.cassiopeia_agent.main 을 실행하면 설정 마법사를 사용할 수 있습니다."
+        "start.sh 또는 start.bat 을 실행해 .env 파일을 생성하세요."
     )
 
 
