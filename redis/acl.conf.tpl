@@ -17,12 +17,7 @@ user cassiopeia on >CASSIOPEIA_PASSWORD_PLACEHOLDER ~* &* +@all
 # ── community: 하위 호환성용 (광범위 와일드카드 제거) ────────────────────────
 # 기존 에이전트들이 community 계정을 사용할 경우를 위해 남겨두되, 
 # agent:*:tasks 와 같은 와일드카드는 제거하여 다른 에이전트 침범을 방지합니다.
-user community on >COMMUNITY_PASSWORD_PLACEHOLDER \
-  ~cassiopeia:results:* \
-  ~cassiopeia:dlq \
-  resetchannels \
-  +rpush \
-  +llen
+user community on >COMMUNITY_PASSWORD_PLACEHOLDER ~cassiopeia:results:* ~cassiopeia:dlq resetchannels +rpush +llen
 
 # ── 하위 에이전트별 계정은 entrypoint.sh에서 동적 생성됩니다 ──────────────────
 # 생성 규칙: user {name} on >{PASS} ~agent:{name}:tasks ~agent:{name}:health ...

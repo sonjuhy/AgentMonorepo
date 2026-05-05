@@ -1,0 +1,4 @@
+# Force LF for shell scripts so Docker on Windows doesn't get CRLF
+*.sh text eol=lf
+*.conf text eol=lf
+*.tpl text eol=lf
