@@ -77,15 +77,22 @@ class TestDLQReplay:
         data = resp.json()
         assert data["replayed"] == 1
 
-    async def test_replay_pushes_to_orchestra_queue(self, async_client, fake_redis):
+    async def test_replay_publishes_to_orchestra_channel(self, async_client, fake_redis):
+        from unittest.mock import AsyncMock
         entries = await _push_dlq(fake_redis, count=1)
         task_id = entries[0]["task_id"]
 
-        before_len = await fake_redis.llen("agent:orchestra:tasks")
-        await async_client.post("/admin/dlq/replay", json={"task_id": task_id})
-        after_len = await fake_redis.llen("agent:orchestra:tasks")
+        published: list = []
 
-        assert after_len == before_len + 1
+        async def _capture(channel, data):
+            published.append((channel, data))
+            return 1
+
+        fake_redis.publish = _capture
+        await async_client.post("/admin/dlq/replay", json={"task_id": task_id})
+
+        assert len(published) == 1
+        assert published[0][0] == "agent:orchestra"
 
     async def test_replay_nonexistent_task_returns_404(self, async_client):
         resp = await async_client.post("/admin/dlq/replay", json={

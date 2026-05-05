@@ -847,18 +847,21 @@ async def broadcast_message(body: BroadcastBody) -> dict[str, Any]:
         registry = await ctx.redis_client.hgetall("agents:registry")
         targets = list(registry.keys())
 
+    from cassiopeia_sdk.client import AgentMessage as _AgentMessage
+
     pushed: list[str] = []
     for agent_name in targets:
-        msg = {
-            "task_id": str(uuid.uuid4()),
-            "action": "broadcast",
-            "content": body.message,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        await ctx.redis_client.rpush(
-            f"agent:{agent_name}:tasks",
-            json.dumps(msg, ensure_ascii=False),
+        msg = _AgentMessage(
+            sender="orchestra",
+            receiver=agent_name,
+            action="broadcast",
+            payload={
+                "task_id": str(uuid.uuid4()),
+                "content": body.message,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
         )
+        await ctx.redis_client.publish(f"agent:{agent_name}", msg.to_json())
         pushed.append(agent_name)
 
     return {
@@ -921,7 +924,8 @@ async def replay_dlq_task(body: DLQReplayBody) -> dict[str, Any]:
             detail=f"DLQ에서 task_id='{body.task_id}'를 찾을 수 없습니다.",
         )
 
-    # 재처리를 위해 오케스트라 태스크 큐에 재삽입
+    # 재처리를 위해 오케스트라에 Pub/Sub으로 재전달
+    from cassiopeia_sdk.client import AgentMessage as _AgentMessage
     replay_task = {
         "task_id": target_entry.get("task_id"),
         "session_id": target_entry.get("session_id", "dlq-replay"),
@@ -930,7 +934,13 @@ async def replay_dlq_task(body: DLQReplayBody) -> dict[str, Any]:
         "source": "dlq_replay",
         "replayed_at": datetime.now(timezone.utc).isoformat(),
     }
-    await ctx.redis_client.rpush(_ORCHESTRA_TASKS_KEY, json.dumps(replay_task, ensure_ascii=False))
+    replay_msg = _AgentMessage(
+        sender="admin",
+        receiver="orchestra",
+        action="user_request",
+        payload=replay_task,
+    )
+    await ctx.redis_client.publish("agent:orchestra", replay_msg.to_json())
 
     # DLQ에서 해당 항목 제거 (lrem: 첫 번째 일치 항목 1개 제거)
     if target_raw:

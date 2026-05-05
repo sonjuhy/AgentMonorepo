@@ -1,29 +1,26 @@
 """
 Redis 메시지 브로커 클라이언트
-- agent:orchestra:tasks   : 소통 에이전트 → 오케스트라 (사용자 요청 전달)
-- agent:communication:tasks: 오케스트라 → 소통 에이전트 (처리 결과 수신)
-- orchestra:results        : 소통 에이전트 → 오케스트라 (사용자 승인/반려 피드백)
-- slack:session:{id}:*     : 세션 기반 스레드 및 진행 메시지 ts 캐싱
+- 세션 상태·승인 피드백·헬스체크 전용
+- Discord/Telegram은 아직 cassiopeia Pub/Sub 미전환 — blpop_comm_task 잔존
+
+참고: Slack 오케스트라 ↔ 소통 에이전트 간 태스크 통신은
+      cassiopeia-sdk (Redis Pub/Sub)를 통해 SlackCommAgent가 직접 처리합니다.
 """
 
 import json
 import logging
 import os
-import uuid
 from typing import Any
 
 import redis.asyncio as aioredis
-from shared_core.dispatch_auth import sign_task
 
 logger = logging.getLogger("slack_agent.redis_broker")
 
-# Redis 큐 키 상수
-ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
-COMM_TASKS_KEY = "agent:communication:tasks"                       # Slack 기본
-DISCORD_COMM_TASKS_KEY = "agent:communication:discord:tasks"       # Discord 전용
-TELEGRAM_COMM_TASKS_KEY = "agent:communication:telegram:tasks"     # Telegram 전용
+# Discord/Telegram 아웃바운드 큐 (아직 Pub/Sub 미전환)
+COMM_TASKS_KEY = "agent:communication:tasks"
+DISCORD_COMM_TASKS_KEY = "agent:communication:discord:tasks"
+TELEGRAM_COMM_TASKS_KEY = "agent:communication:telegram:tasks"
 
-# 플랫폼 → 통신 큐 매핑
 PLATFORM_COMM_QUEUE: dict[str, str] = {
     "slack": COMM_TASKS_KEY,
     "discord": DISCORD_COMM_TASKS_KEY,
@@ -31,7 +28,6 @@ PLATFORM_COMM_QUEUE: dict[str, str] = {
 }
 
 # 승인 피드백은 태스크별 큐를 사용 (오케스트라와 일치)
-# 키 형식: orchestra:approval:{approval_task_id}
 _APPROVAL_KEY_PREFIX = "orchestra:approval:"
 
 # 세션 TTL: 2시간
@@ -40,7 +36,7 @@ _SESSION_TTL = 7200
 
 class RedisBroker:
     """
-    소통 에이전트의 Redis 메시지 브로커 클라이언트.
+    소통 에이전트의 Redis 클라이언트 (세션 상태·승인 피드백 전용).
 
     환경 변수:
         REDIS_URL: Redis 접속 URL (기본값: redis://localhost:6379)
@@ -50,50 +46,13 @@ class RedisBroker:
         redis_url = url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
         if "localhost" in redis_url:
             redis_url = redis_url.replace("localhost", "127.0.0.1")
-            
+
         self._client: aioredis.Redis = aioredis.from_url(
             redis_url,
             decode_responses=True,
             socket_timeout=60.0,
             socket_connect_timeout=5.0,
         )
-
-    # ── 오케스트라 큐 ──────────────────────────────────────────────────────────
-
-    async def push_to_orchestra(
-        self,
-        user_id: str,
-        channel_id: str,
-        content: str,
-        thread_ts: str | None = None,
-        source: str = "slack",
-    ) -> str:
-        """
-        사용자 요청을 agent:orchestra:tasks 큐에 삽입합니다.
-
-        Args:
-            user_id (str): 플랫폼 사용자 ID.
-            channel_id (str): 플랫폼 채널/채팅 ID.
-            content (str): 정제된 메시지 텍스트.
-            thread_ts (str | None): 스레드 루트 ts (Slack) 또는 메시지 ID (Discord/Telegram).
-            source (str): 메시지 출처 플랫폼 ("slack" | "discord" | "telegram").
-
-        Returns:
-            str: 생성된 task_id (UUID).
-        """
-        task_id = str(uuid.uuid4())
-        session_id = f"{user_id}:{channel_id}"
-        task: dict[str, Any] = {
-            "task_id": task_id,
-            "session_id": session_id,
-            "requester": {"user_id": user_id, "channel_id": channel_id},
-            "content": content,
-            "source": source,
-            "thread_ts": thread_ts,
-        }
-        await self._client.rpush(ORCHESTRA_TASKS_KEY, json.dumps(sign_task(task), ensure_ascii=False))
-        logger.debug("[RedisBroker] push_to_orchestra task_id=%s session_id=%s source=%s", task_id, session_id, source)
-        return task_id
 
     async def push_approval(self, feedback: dict[str, Any]) -> None:
         """
@@ -115,17 +74,35 @@ class RedisBroker:
         await self._client.rpush(key, json.dumps(feedback, ensure_ascii=False))
         logger.debug("[RedisBroker] push_approval key=%s action=%s", key, feedback.get("action"))
 
+    async def push_to_orchestra(
+        self,
+        user_id: str,
+        channel_id: str,
+        content: str,
+        thread_ts: str | None = None,
+        source: str = "slack",
+    ) -> str:
+        """Discord/Telegram용 오케스트라 큐 직접 삽입 (Pub/Sub 전환 전까지 잔존).
+        Slack은 SlackCommAgent가 cassiopeia.send_message()로 직접 처리합니다.
+        """
+        import uuid as _uuid
+        from shared_core.dispatch_auth import sign_task as _sign_task
+        task_id = str(_uuid.uuid4())
+        session_id = f"{user_id}:{channel_id}"
+        task: dict[str, Any] = {
+            "task_id": task_id,
+            "session_id": session_id,
+            "requester": {"user_id": user_id, "channel_id": channel_id},
+            "content": content,
+            "source": source,
+            "thread_ts": thread_ts,
+        }
+        await self._client.rpush("agent:orchestra:tasks", json.dumps(_sign_task(task), ensure_ascii=False))
+        logger.debug("[RedisBroker] push_to_orchestra task_id=%s source=%s", task_id, source)
+        return task_id
+
     async def blpop_comm_task(self, timeout: float = 5.0, queue_key: str | None = None) -> dict[str, Any] | None:
-        """
-        통신 결과 큐에서 메시지를 블로킹으로 수신합니다.
-
-        Args:
-            timeout (float): 블로킹 대기 시간(초). 0이면 무제한 대기.
-            queue_key (str | None): 수신할 큐 키. None이면 기본 Slack 큐 사용.
-
-        Returns:
-            dict | None: OrchestraResult 스키마 딕셔너리, 타임아웃 시 None.
-        """
+        """Discord/Telegram 아웃바운드 큐에서 결과를 수신합니다 (Pub/Sub 전환 전까지 잔존)."""
         key = queue_key or COMM_TASKS_KEY
         result = await self._client.blpop(key, timeout=timeout)
         if result is None:

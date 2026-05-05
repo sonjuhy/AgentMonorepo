@@ -1,4 +1,3 @@
-from .agent import OrchestraAgent
 from .registry import AgentRegistry
 from .intent_analyzer import (
     ClaudeAPIIntentAnalyzer,
@@ -10,7 +9,6 @@ from .intent_analyzer import (
 from .interfaces import OrchestraAgentProtocol, AgentRegistryProtocol
 
 __all__ = [
-    "OrchestraAgent",
     "AgentRegistry",
     "ClaudeAPIIntentAnalyzer",
     "GeminiAPIIntentAnalyzer",

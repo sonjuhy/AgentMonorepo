@@ -1,9 +1,9 @@
 """
 소통 에이전트 구체 구현체 (v3 - SlackCommAgent)
 - Slack API와 Redis 사이의 양방향 게이트웨이
-- Inbound:  Slack → on_user_request → Redis agent:orchestra:tasks
-- Outbound: Redis agent:communication:tasks → listen_system_results → Slack
-- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis orchestra:results
+- Inbound:  Slack → on_user_request → cassiopeia Pub/Sub agent:orchestra
+- Outbound: cassiopeia Pub/Sub agent:communication → listen_system_results → Slack
+- Feedback: [승인/수정 요청/취소] 버튼 클릭 → Redis orchestra:approval:{task_id}
 - Notion 알림 발송 기능 유지 (fetch_notifications / run)
 """
 
@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from typing import Any
 
 import httpx
+from cassiopeia_sdk.client import CassiopeiaClient
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -31,6 +33,7 @@ from .message_cleaner import MessageCleaner
 from .notion_parser import parse_notion_task
 from .redis_broker import RedisBroker
 from .formatter import SlackFormatter
+from shared_core.dispatch_auth import sign_task
 
 logger = logging.getLogger("slack_agent.agent")
 
@@ -88,6 +91,7 @@ class SlackCommAgent:
         self,
         web_client: AsyncWebClient | None = None,
         redis: RedisBroker | None = None,
+        cassiopeia: CassiopeiaClient | None = None,
     ) -> None:
         """
         SlackCommAgent 초기화.
@@ -97,9 +101,12 @@ class SlackCommAgent:
                 외부 주입 slack_sdk AsyncWebClient.
                 None이면 SLACK_BOT_TOKEN 환경변수로 새로 생성합니다.
             redis (RedisBroker | None):
-                외부 주입 RedisBroker.
+                외부 주입 RedisBroker (세션 상태·승인 피드백 전용).
                 None이면 REDIS_URL 환경변수로 새로 생성합니다.
                 Redis 없이도 Notion 알림 기능은 동작합니다.
+            cassiopeia (CassiopeiaClient | None):
+                외부 주입 CassiopeiaClient (오케스트라 Pub/Sub 통신 전용).
+                None이면 REDIS_URL 환경변수로 자동 생성합니다.
         """
         self._notion_token: str = os.environ.get("NOTION_TOKEN", "")
         self._database_id: str = os.environ.get("NOTION_DB_ID", "")
@@ -117,6 +124,8 @@ class SlackCommAgent:
             self._web_client = AsyncWebClient(token=bot_token)
 
         self._redis: RedisBroker | None = redis
+        self._cassiopeia: CassiopeiaClient | None = cassiopeia
+        self._cassiopeia_connected: bool = cassiopeia is not None
         self._heartbeat_task: asyncio.Task[None] | None = None
 
     # ── 권한 확인 ──────────────────────────────────────────────────────────────
@@ -124,6 +133,16 @@ class SlackCommAgent:
     def is_authorized(self, user_id: str, channel_id: str) -> bool:
         """허용된 채널 및 사용자인지 확인합니다."""
         return _is_authorized(user_id, channel_id)
+
+    async def _ensure_cassiopeia(self) -> CassiopeiaClient:
+        """CassiopeiaClient를 반환합니다. 미연결 상태면 연결합니다."""
+        if self._cassiopeia is None:
+            redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379").replace("localhost", "127.0.0.1")
+            self._cassiopeia = CassiopeiaClient(agent_id=self.agent_name, redis_url=redis_url)
+        if not self._cassiopeia_connected:
+            await self._cassiopeia.connect()
+            self._cassiopeia_connected = True
+        return self._cassiopeia
 
     # ── Inbound: 사용자 요청 처리 ──────────────────────────────────────────────
 
@@ -152,7 +171,6 @@ class SlackCommAgent:
             return
 
         # 사용자의 현재 메시지에 스레드로 답변 (이미 스레드 내부라면 해당 스레드 유지)
-        # 만약 스레드 없이 새 메시지로만 하고 싶다면 thread_ts = None 으로 설정하면 됩니다.
         thread_ts = event.get("thread_ts") or ts
 
         await self._web_client.chat_postMessage(
@@ -163,13 +181,23 @@ class SlackCommAgent:
 
         # 세션 ID: NLU 컨텍스트용
         session_id = f"{user_id}:{channel_id}"
+        task_id = str(uuid.uuid4())
 
-        # 오케스트라 큐에 전달 (현재 메시지의 thread_ts 전달)
-        task_id = await self._redis.push_to_orchestra(
-            user_id=user_id,
-            channel_id=channel_id,
-            content=clean_text,
-            thread_ts=thread_ts,
+        task: dict[str, Any] = {
+            "task_id": task_id,
+            "session_id": session_id,
+            "requester": {"user_id": user_id, "channel_id": channel_id},
+            "content": clean_text,
+            "source": "slack",
+            "thread_ts": thread_ts,
+        }
+
+        # cassiopeia Pub/Sub으로 오케스트라에 전달 (서명 포함)
+        cassiopeia = await self._ensure_cassiopeia()
+        await cassiopeia.send_message(
+            action="user_request",
+            payload=sign_task(task),
+            receiver="orchestra",
         )
 
         # 태스크 컨텍스트 저장 (결과 수신 시 정확한 채널/스레드로 복원)
@@ -191,7 +219,7 @@ class SlackCommAgent:
 
     async def listen_system_results(self) -> None:
         """
-        Redis agent:communication:tasks 큐를 모니터링하여
+        cassiopeia Pub/Sub agent:communication 채널을 구독하여
         오케스트라 결과를 Slack Block Kit으로 렌더링합니다.
         """
         if self._redis is None:
@@ -203,17 +231,16 @@ class SlackCommAgent:
             self._heartbeat_loop(), name="comm_agent_heartbeat"
         )
 
-        logger.info("[CommAgent] Redis 결과 리스너 시작 (queue=%s)", "agent:communication:tasks")
-        while True:
-            try:
-                result = await self._redis.blpop_comm_task(timeout=5.0)
-                if result:
-                    await self._handle_system_result(result)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.error("[CommAgent] 결과 처리 오류: %s", exc)
-                await asyncio.sleep(1)
+        cassiopeia = await self._ensure_cassiopeia()
+        logger.info("[CommAgent] cassiopeia 결과 리스너 시작 (channel=agent:%s)", self.agent_name)
+        try:
+            async for msg in cassiopeia.listen():
+                try:
+                    await self._handle_system_result(dict(msg.payload))
+                except Exception as exc:
+                    logger.error("[CommAgent] 결과 처리 오류: %s", exc)
+        except asyncio.CancelledError:
+            pass
 
     async def _heartbeat_loop(self) -> None:
         """15초마다 Orchestra Agent에 생존 신호를 기록합니다 (유효 시간 30초)."""

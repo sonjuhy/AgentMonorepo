@@ -4,8 +4,8 @@ Archive Agent FastAPI 서버 (server 모드)
 - POST /execute      : Redis 우회 직접 실행 (개발/테스트용)
 
 Lifespan 백그라운드:
-    - ArchiveRedisListener.listen_tasks()  — BLPOP 큐 감시
-    - ArchiveRedisListener._heartbeat_loop() — 15초 주기 health 갱신
+    - ArchiveCassiopeiaListener.listen_tasks()  — Pub/Sub 채널 구독
+    - ArchiveCassiopeiaListener._heartbeat_loop() — 15초 주기 health 갱신
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 
 from .unified_agent import UnifiedArchiveAgent
-from .redis_listener import ArchiveRedisListener
+from .cassiopeia_listener import ArchiveCassiopeiaListener
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +55,7 @@ class ExecuteRequest(BaseModel):
 
 class _AppContext:
     agent: UnifiedArchiveAgent
-    listener: ArchiveRedisListener
+    listener: ArchiveCassiopeiaListener
     listen_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
 
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     logger.info("[Lifespan] Archive Agent 서버 시작 (Unified Mode)")
 
     _ctx.agent = UnifiedArchiveAgent()
-    _ctx.listener = ArchiveRedisListener(
+    _ctx.listener = ArchiveCassiopeiaListener(
         archive_agent=_ctx.agent,
         redis_url=os.environ.get("REDIS_URL"),
         orchestra_url=os.environ.get("ORCHESTRA_URL"),

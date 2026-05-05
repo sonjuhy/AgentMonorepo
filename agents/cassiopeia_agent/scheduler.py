@@ -2,7 +2,7 @@
 ScheduledTaskRunner — Redis Sorted Set 기반 태스크 스케줄러
 
 - orchestra:scheduled_tasks (Sorted Set): score = 실행 예정 Unix timestamp
-- 주기적으로 due 태스크를 꺼내 agent:orchestra:tasks 큐에 push
+- 주기적으로 due 태스크를 꺼내 cassiopeia Pub/Sub으로 orchestra에 publish
 - repeat_interval_secs > 0 이면 완료 후 다음 실행 시각으로 재등록
 - 환경변수 SCHEDULE_POLL_INTERVAL(초)로 폴링 간격 조정 (기본 10초)
 """
@@ -19,11 +19,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import redis.asyncio as aioredis
+from cassiopeia_sdk.client import AgentMessage
 
 logger = logging.getLogger("cassiopeia_agent.scheduler")
 
 _SCHEDULED_TASKS_KEY = "orchestra:scheduled_tasks"
-_ORCHESTRA_TASKS_KEY = "agent:orchestra:tasks"
+_ORCHESTRA_CHANNEL = "agent:orchestra"
 _POLL_INTERVAL: int = int(os.environ.get("SCHEDULE_POLL_INTERVAL", "10"))
 
 
@@ -47,14 +48,14 @@ class ScheduledTaskRunner:
     def __init__(
         self,
         redis_client: aioredis.Redis | None = None,
-        orchestra_queue_key: str = _ORCHESTRA_TASKS_KEY,
+        orchestra_channel: str = _ORCHESTRA_CHANNEL,
     ) -> None:
         if redis_client is not None:
             self._redis = redis_client
         else:
             redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
             self._redis = aioredis.from_url(redis_url, decode_responses=True, socket_timeout=5.0)
-        self._queue_key = orchestra_queue_key
+        self._channel = orchestra_channel
 
     async def schedule(
         self,
@@ -155,7 +156,13 @@ class ScheduledTaskRunner:
         await self._redis.zrem(_SCHEDULED_TASKS_KEY, raw)
 
         task_to_push = {**task, "task_id": str(uuid.uuid4())}
-        await self._redis.rpush(self._queue_key, json.dumps(task_to_push, ensure_ascii=False))
+        msg = AgentMessage(
+            sender="scheduler",
+            receiver="orchestra",
+            action="scheduled_task",
+            payload=task_to_push,
+        )
+        await self._redis.publish(self._channel, msg.to_json())
         logger.info("[Scheduler] 태스크 디스패치: schedule_id=%s task_id=%s", schedule_id, task_to_push["task_id"])
 
         if repeat > 0:

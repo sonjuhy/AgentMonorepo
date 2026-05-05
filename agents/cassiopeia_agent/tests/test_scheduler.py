@@ -3,7 +3,7 @@ scheduler.py 테스트
 - schedule(): 단일 / 반복 태스크 등록
 - cancel(): 취소 성공 / 없는 ID
 - list_pending(): 전체 조회
-- _dispatch_due_task(): 큐 push / 반복 재등록
+- _dispatch_due_task(): Pub/Sub publish / 반복 재등록
 - run_loop(): due 태스크 처리 후 CancelledError 정상 종료
 """
 from __future__ import annotations
@@ -15,15 +15,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agents.cassiopeia_agent.scheduler import ScheduledTaskRunner
+from agents.cassiopeia_agent.scheduler import ScheduledTaskRunner, _ORCHESTRA_CHANNEL
 
-_QUEUE_KEY = "agent:orchestra:tasks"
 _SCHEDULED_KEY = "orchestra:scheduled_tasks"
 
 
 @pytest.fixture
 def scheduler(fake_redis):
-    return ScheduledTaskRunner(redis_client=fake_redis, orchestra_queue_key=_QUEUE_KEY)
+    return ScheduledTaskRunner(redis_client=fake_redis)
 
 
 # ── schedule ──────────────────────────────────────────────────────────────────
@@ -107,28 +106,38 @@ class TestListPending:
 # ── _dispatch_due_task ────────────────────────────────────────────────────────
 
 class TestDispatchDueTask:
-    async def test_pushes_task_to_orchestra_queue(self, scheduler, fake_redis):
+    async def test_publishes_task_to_orchestra_channel(self, scheduler, fake_redis):
+        fake_redis.publish = AsyncMock(return_value=1)
         entry = json.dumps({
             "schedule_id": "sid-1",
             "task": {"task_id": "t1", "content": "hello"},
             "repeat_interval_secs": 0,
         })
         await scheduler._dispatch_due_task(entry, time.time())
-        length = await fake_redis.llen(_QUEUE_KEY)
-        assert length == 1
+        fake_redis.publish.assert_called_once()
+        channel, _ = fake_redis.publish.call_args.args
+        assert channel == _ORCHESTRA_CHANNEL
 
     async def test_dispatched_task_has_new_task_id(self, scheduler, fake_redis):
+        published_payloads: list[str] = []
+
+        async def _capture_publish(channel, data):
+            published_payloads.append(data)
+            return 1
+
+        fake_redis.publish = _capture_publish
         entry = json.dumps({
             "schedule_id": "sid-1",
             "task": {"task_id": "original-id", "content": "x"},
             "repeat_interval_secs": 0,
         })
         await scheduler._dispatch_due_task(entry, time.time())
-        raw = await fake_redis.lpop(_QUEUE_KEY)
-        pushed = json.loads(raw)
-        assert pushed["task_id"] != "original-id"
+        assert len(published_payloads) == 1
+        msg = json.loads(published_payloads[0])
+        assert msg["payload"]["task_id"] != "original-id"
 
     async def test_one_shot_not_rescheduled(self, scheduler, fake_redis):
+        fake_redis.publish = AsyncMock(return_value=1)
         entry = json.dumps({
             "schedule_id": "sid-1",
             "task": {"task_id": "t1", "content": "x"},
@@ -138,6 +147,7 @@ class TestDispatchDueTask:
         assert await fake_redis.zcard(_SCHEDULED_KEY) == 0
 
     async def test_recurring_task_rescheduled(self, scheduler, fake_redis):
+        fake_redis.publish = AsyncMock(return_value=1)
         score = time.time()
         entry = json.dumps({
             "schedule_id": "sid-1",
@@ -162,6 +172,14 @@ class TestDispatchDueTask:
 
 class TestRunLoop:
     async def test_dispatches_due_tasks_and_cancels(self, scheduler, fake_redis):
+        publish_calls: list = []
+
+        async def _capture_publish(channel, data):
+            publish_calls.append(data)
+            return 1
+
+        fake_redis.publish = _capture_publish
+
         # 현재 시각보다 과거인 태스크 등록
         await scheduler.schedule({"content": "due_task"}, run_at=time.time() - 1)
 
@@ -175,9 +193,16 @@ class TestRunLoop:
                 pass
 
         await _run_and_cancel()
-        assert await fake_redis.llen(_QUEUE_KEY) == 1
+        assert len(publish_calls) == 1
 
     async def test_future_tasks_not_dispatched_early(self, scheduler, fake_redis):
+        publish_calls: list = []
+
+        async def _capture_publish(channel, data):
+            publish_calls.append(data)
+            return 1
+
+        fake_redis.publish = _capture_publish
         await scheduler.schedule({"content": "future"}, run_at=time.time() + 9999)
 
         async def _run_briefly():
@@ -190,4 +215,4 @@ class TestRunLoop:
                 pass
 
         await _run_briefly()
-        assert await fake_redis.llen(_QUEUE_KEY) == 0
+        assert len(publish_calls) == 0

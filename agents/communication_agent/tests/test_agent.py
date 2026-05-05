@@ -15,11 +15,16 @@ def mock_web_client():
 @pytest.fixture
 def mock_redis():
     broker = AsyncMock(spec=RedisBroker)
-    broker.push_to_orchestra.return_value = "fake-task-id"
     return broker
 
 @pytest.fixture
-def agent(mock_web_client, mock_redis, monkeypatch):
+def mock_cassiopeia():
+    client = AsyncMock()
+    client.send_message = AsyncMock(return_value=True)
+    return client
+
+@pytest.fixture
+def agent(mock_web_client, mock_redis, mock_cassiopeia, monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
     monkeypatch.setenv("NOTION_TOKEN", "fake-notion")
     monkeypatch.setenv("NOTION_DB_ID", "fake-db")
@@ -27,7 +32,9 @@ def agent(mock_web_client, mock_redis, monkeypatch):
     # Reset allowed lists for testing
     monkeypatch.setenv("SLACK_ALLOWED_CHANNELS", "")
     monkeypatch.setenv("SLACK_ALLOWED_USERS", "")
-    return SlackCommAgent(web_client=mock_web_client, redis=mock_redis)
+    a = SlackCommAgent(web_client=mock_web_client, redis=mock_redis, cassiopeia=mock_cassiopeia)
+    a._cassiopeia_connected = True
+    return a
 
 @pytest.mark.asyncio
 async def test_is_authorized_allow_all(agent):
@@ -46,41 +53,45 @@ async def test_is_authorized_restricted(monkeypatch):
     assert restricted_agent.is_authorized("U1", "C3") is False
 
 @pytest.mark.asyncio
-async def test_on_user_request_unauthorized(agent, mock_redis, mock_web_client):
+async def test_on_user_request_unauthorized(agent, mock_redis, mock_cassiopeia, mock_web_client):
     # Mocking it to return False
     agent.is_authorized = MagicMock(return_value=False)
-    
+
     event = {"user": "U1", "channel": "C1", "ts": "111", "text": "hello"}
     await agent.on_user_request(event, say=AsyncMock())
-    
-    mock_redis.push_to_orchestra.assert_not_called()
+
+    mock_cassiopeia.send_message.assert_not_called()
     mock_web_client.chat_postMessage.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_on_user_request_success(agent, mock_redis, mock_web_client):
+async def test_on_user_request_success(agent, mock_redis, mock_cassiopeia, mock_web_client):
     event = {"user": "U1", "channel": "C1", "ts": "111.0", "text": "<@U123> help"}
     await agent.on_user_request(event, say=AsyncMock())
-    
+
     mock_web_client.chat_postMessage.assert_called_once_with(
         channel="C1",
         thread_ts="111.0",
         text="⏳ 요청을 접수했습니다. 처리 중입니다..."
     )
-    mock_redis.push_to_orchestra.assert_called_once_with(
-        user_id="U1",
-        channel_id="C1",
-        content="help",
-        thread_ts="111.0"
-    )
-    mock_redis.save_task_context.assert_called_once_with(
-        "fake-task-id",
-        {
-            "channel_id": "C1",
-            "thread_ts": "111.0",
-            "user_id": "U1",
-            "session_id": "U1:C1"
-        }
-    )
+    # cassiopeia should send to orchestra with signed task payload
+    mock_cassiopeia.send_message.assert_called_once()
+    call_kwargs = mock_cassiopeia.send_message.call_args.kwargs
+    assert call_kwargs["action"] == "user_request"
+    assert call_kwargs["receiver"] == "orchestra"
+    payload = call_kwargs["payload"]
+    assert payload["content"] == "help"
+    assert payload["requester"]["user_id"] == "U1"
+    assert payload["requester"]["channel_id"] == "C1"
+
+    # task context should be saved
+    mock_redis.save_task_context.assert_called_once()
+    ctx_args = mock_redis.save_task_context.call_args
+    task_id = ctx_args[0][0]
+    ctx = ctx_args[0][1]
+    assert ctx["channel_id"] == "C1"
+    assert ctx["thread_ts"] == "111.0"
+    assert ctx["user_id"] == "U1"
+    assert ctx["session_id"] == "U1:C1"
 
 @pytest.mark.asyncio
 async def test_handle_system_result_no_context(agent, mock_redis, mock_web_client):

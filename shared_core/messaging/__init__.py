@@ -1,4 +1,3 @@
-from .broker import CassiopeiaMessageBroker
 from .schema import AgentMessage, AgentName, ActionName, MessageBrokerProtocol
 
 __all__ = [
@@ -6,5 +5,4 @@ __all__ = [
     "AgentName",
     "ActionName",
     "MessageBrokerProtocol",
-    "CassiopeiaMessageBroker",
 ]
