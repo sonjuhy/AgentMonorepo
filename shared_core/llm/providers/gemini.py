@@ -82,4 +82,4 @@ class GeminiProvider:
             return True
         except Exception as e:
             logger.error("[Gemini] 연결 검증 실패: %s", e)
-            return False
+            raise

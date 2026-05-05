@@ -138,4 +138,4 @@ class LocalProvider:
             return True
         except Exception as e:
             logger.error("[Local] 연결 검증 실패 (%s): %s", self._base_url, e)
-            return False
+            raise

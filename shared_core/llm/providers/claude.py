@@ -79,4 +79,4 @@ class ClaudeProvider:
             return True
         except Exception as e:
             logger.error("[Claude] 연결 검증 실패: %s", e)
-            return False
+            raise

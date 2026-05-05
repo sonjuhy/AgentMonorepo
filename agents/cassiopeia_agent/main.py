@@ -425,11 +425,11 @@ async def _startup(app: FastAPI):  # noqa: C901
     try:
         nlu_engine = build_nlu_engine()
         logger.info("[Lifespan] NLU 엔진 생성 완료 (%s)", nlu_engine.__class__.__name__)
-        if not await nlu_engine.validate():
-            raise _StartupError("LLM API 연결 검증 실패")
+        await nlu_engine.validate()
+    except _StartupError:
+        raise
     except Exception as exc:
-        logger.error("[Lifespan] NLU 초기화 실패: %s", exc)
-        raise _StartupError(f"NLU 초기화 실패: {exc}")
+        raise _StartupError(f"LLM API 연결 실패: {exc}") from exc
 
     ctx.manager = CassiopeiaManager(
         redis_client=ctx.redis_client,
