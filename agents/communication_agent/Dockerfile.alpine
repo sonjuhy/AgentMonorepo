@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir -r /app/agents/communication_agent/requirements.t
 ENV PYTHONPATH=/app
 
 # 진입점 설정: 데몬 또는 무한 대기 상태가 아닌, 단일 스크립트 실행 후 즉시 종료
-CMD ["python", "/app/agents/communication_agent/main.py"]
+CMD ["python", "-m", "agents.communication_agent.main"]

@@ -22,4 +22,4 @@ ENV PYTHONPATH=/app
 EXPOSE 8000
 
 # 진입점: uvicorn 으로 FastAPI 앱 실행 (Socket Mode 자동 시작)
-CMD ["python", "/app/agents/communication_agent/listener_main.py"]
+CMD ["python", "-m", "agents.communication_agent.listener_main"]
