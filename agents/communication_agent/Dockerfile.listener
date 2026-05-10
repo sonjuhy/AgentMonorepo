@@ -1,4 +1,4 @@
-# Slack Agent FastAPI 서버 (장기 실행 Socket Mode 리스너)
+# Communication Agent FastAPI 서버 (장기 실행 Socket Mode 리스너)
 # - FastAPI + uvicorn + slack_sdk Socket Mode 기반
 # - docker run 으로 에이전트 컨테이너를 트리거하므로 docker-cli 포함
 FROM python:3.12-alpine
@@ -9,14 +9,17 @@ RUN apk add --no-cache docker-cli gcc musl-dev libffi-dev
 WORKDIR /app
 
 # 모노리포 구조: 필요한 모듈만 복사
-COPY ./agents/__init__.py /app/agents/__init__.py
-COPY ./agents/slack_agent /app/agents/slack_agent
+COPY ./agents/__init__.py              /app/agents/__init__.py
+COPY ./agents/communication_agent      /app/agents/communication_agent
+COPY ./shared_core                     /app/shared_core
 
 # 의존성 설치
-RUN pip install --no-cache-dir -r /app/agents/slack_agent/requirements.txt
+RUN pip install --no-cache-dir -r /app/agents/communication_agent/requirements.txt
+
+ENV PYTHONPATH=/app
 
 # FastAPI 헬스체크 포트
 EXPOSE 8000
 
 # 진입점: uvicorn 으로 FastAPI 앱 실행 (Socket Mode 자동 시작)
-CMD ["python", "/app/agents/slack_agent/listener_main.py"]
+CMD ["python", "/app/agents/communication_agent/listener_main.py"]
